@@ -14,19 +14,11 @@ type NodeId = usize;
 
 //		ActivationFunction::Sigmoid => 1.0f32/(1.0 + (-value).exp()),
 
-#[derive(Hash, Eq, PartialEq, Debug, Copy, Clone)]
-enum Operation<F> {
-	Input,
-	MatrixMultiply(NodeId, NodeId),
-	MatrixBinaryOp(NodeId, NodeId, F),
-	MatrixUnaryOp(NodeId, F),
-//	Transpose(NodeId),
-}
-
 struct Node<F> {
 	id : NodeId,
 	shape : Dimension,
-	operation : Operation<F>,
+	inputs : Vec<NodeId>,
+	operation : F,
 	buffer : Vec<f32>,
 }
 
@@ -72,6 +64,8 @@ impl<F> Graph<F> where F: Fn(f32, f32)->f32 {
 	// Graph methods
 	fn get_output(&mut self, node_id : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> Vec<f32> {
 		//(node.operation)(&self, input_map)
+		vec![]
+/*
 		match self.nodes[node_id].operation {
 			Operation::Input => input_map.get(&node_id).unwrap().clone(),
 			Operation::MatrixMultiply(n1, n2) => {
@@ -125,14 +119,16 @@ impl<F> Graph<F> where F: Fn(f32, f32)->f32 {
 				self.nodes[node_id].buffer.clone()
 			}
 		}
+*/
 	}
 
 	// Node creation
 	fn new_input(&mut self, shape : Dimension) -> NodeId {
 		let mut n = Node {
 			id : 0,
+			inputs: vec![],
 			shape : shape,
-			operation : Operation::Input,
+			operation : |a, b| { 0.0 },
 			buffer : vec![0.0; shape.0*shape.1], //self.proque.create_buffer::<f32>().unwrap()
 		};
 		self.nodes.push(n);
@@ -144,8 +140,9 @@ impl<F> Graph<F> where F: Fn(f32, f32)->f32 {
 	fn new_matmul(&mut self, node_a_id : NodeId, node_b_id : NodeId) -> NodeId {
 		let mut n = Node {
 			id : 0,
+			inputs: vec![],
 			shape : (self.nodes[node_a_id].shape.0, self.nodes[node_b_id].shape.1),
-			operation : Operation::MatrixMultiply(node_a_id, node_b_id),
+			operation : |a, b| { 0.0 },
 			buffer : vec![0.0; self.nodes[node_a_id].shape.0*self.nodes[node_b_id].shape.1],
 		};
 		self.nodes.push(n);
