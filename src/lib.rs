@@ -14,47 +14,26 @@ type NodeId = usize;
 
 //		ActivationFunction::Sigmoid => 1.0f32/(1.0 + (-value).exp()),
 
-struct Node<F> {
+enum Operation {
+	Input,
+	MatrixMultiply(NodeId, NodeId),
+	BinaryElement(NodeId, NodeId, Box<Fn(f32,f32)->f32>),
+	UnaryElement(NodeId, Box<Fn(f32)->f32>),
+}
+
+struct Node {
 	id : NodeId,
 	shape : Dimension,
-	inputs : Vec<NodeId>,
-	operation : F,
-	buffer : Vec<f32>,
+	operation : Operation,
 }
 
-impl<F> Node<F> {
-	fn get_value(&self, x : usize, y : usize) -> f32 {
-		self.buffer[x + y*self.shape.1]
-	}
-
-	fn set_value(&mut self, x : usize, y : usize, value : f32) {
-		self.buffer[x + y*self.shape.1] = value;
-	}
-
-	fn get_rows(&self) -> usize {
-		self.shape.0
-	}
-
-	fn get_columns(&self) -> usize {
-		self.shape.1
-	}
-
-	fn get_width(&self) -> usize {
-		self.shape.1
-	}
-
-	fn get_height(&self) -> usize {
-		self.shape.0
-	}
-}
-
-struct Graph<F> {
+struct Graph {
 //	proque : ProQue,
-	nodes : Vec<Node<F>>,
+	nodes : Vec<Node>,
 }
 
-impl<F> Graph<F> where F: Fn(f32, f32)->f32 {
-	fn new() -> Graph<F> {
+impl Graph {
+	fn new() -> Graph {
 		Graph {
 //			proque : ProQue::builder().src(KERNEL_SOURCE).dims([3]).build().unwrap(),
 			nodes : vec![],
@@ -62,12 +41,10 @@ impl<F> Graph<F> where F: Fn(f32, f32)->f32 {
 	}
 
 	// Graph methods
-	fn get_output(&mut self, node_id : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> Vec<f32> {
+	fn get_output(&self, node_id : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> Vec<f32> {
 		//(node.operation)(&self, input_map)
-		vec![]
-/*
 		match self.nodes[node_id].operation {
-			Operation::Input => input_map.get(&node_id).unwrap().clone(),
+			Operation::Input => { input_map.get(&node_id).unwrap().clone() },
 			Operation::MatrixMultiply(n1, n2) => {
 				// Verify shapes
 				let a_width = self.nodes[n1].shape.1; // Columns (j)
@@ -77,7 +54,8 @@ impl<F> Graph<F> where F: Fn(f32, f32)->f32 {
 				let c_width = b_width;
 				let c_height = a_height;
 				assert_eq!(a_width, b_height);
-				assert_eq!(a_height*b_width, self.nodes[node_id].buffer.len());
+
+				let mut result = vec![0.0; a_height*b_width];
 
 				// Set up the buffer for this node.
 				let a : Vec<f32> = self.get_output(n1, &input_map);
@@ -90,46 +68,43 @@ impl<F> Graph<F> where F: Fn(f32, f32)->f32 {
 						for j in 0..a_width { // Column
 							accumulator += a[j + i*a_width]*b[k + j*b_width];
 						}
-						self.nodes[node_id].buffer[k + i*c_width] = accumulator;
+						result[k + i*c_width] = accumulator;
 					}
 				}
 
-				self.nodes[node_id].buffer.clone()
+				result
 			},
-			Operation::MatrixBinaryOp(n1, n2, f) => {
+			Operation::BinaryElement(n1, n2, ref f) => {
 				let a : Vec<f32> = self.get_output(n1, &input_map);
 				let b : Vec<f32> = self.get_output(n2, &input_map);
-
-				let vec_len = self.nodes[node_id].buffer.len();			
+				let mut result = vec![0.0; a.len()];
+				let vec_len = result.len();			
 
 				for i in 0..vec_len {
-					self.nodes[node_id].buffer[i] = f(a[i], b[i]);
+					result[i] = f(a[i], b[i]);
 				}
 
-				self.nodes[node_id].buffer.clone()
+				result
 			},
-			Operation::MatrixUnaryOp(n1, f) => {
+			Operation::UnaryElement(n1, ref f) => {
 				let a : Vec<f32> = self.get_output(n1, &input_map);
-				let vec_len = self.nodes[node_id].buffer.len();			
+				let vec_len = a.len();			
+				let mut result = vec![0.0; vec_len];
 			
 				for i in 0..vec_len {
-					self.nodes[node_id].buffer[i] = f(a[i], i as f32);
+					result[i] = f(a[i]);
 				}
-
-				self.nodes[node_id].buffer.clone()
+				result
 			}
 		}
-*/
 	}
 
 	// Node creation
 	fn new_input(&mut self, shape : Dimension) -> NodeId {
 		let mut n = Node {
 			id : 0,
-			inputs: vec![],
 			shape : shape,
-			operation : |a, b| { 0.0 },
-			buffer : vec![0.0; shape.0*shape.1], //self.proque.create_buffer::<f32>().unwrap()
+			operation : Operation::Input,
 		};
 		self.nodes.push(n);
 		let id = self.nodes.len()-1;
@@ -140,10 +115,9 @@ impl<F> Graph<F> where F: Fn(f32, f32)->f32 {
 	fn new_matmul(&mut self, node_a_id : NodeId, node_b_id : NodeId) -> NodeId {
 		let mut n = Node {
 			id : 0,
-			inputs: vec![],
 			shape : (self.nodes[node_a_id].shape.0, self.nodes[node_b_id].shape.1),
-			operation : |a, b| { 0.0 },
-			buffer : vec![0.0; self.nodes[node_a_id].shape.0*self.nodes[node_b_id].shape.1],
+			//operation : Operation::BinaryElement(node_a_id, node_b_id, Box::new(|a, b| { 0.0 })),
+			operation : Operation::MatrixMultiply(node_a_id, node_b_id),
 		};
 		self.nodes.push(n);
 		let id = self.nodes.len()-1;
