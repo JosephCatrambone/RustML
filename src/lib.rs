@@ -101,8 +101,6 @@ impl Graph {
 	// TODO: Understand Tann's slides + Torch's updateOutput, updateGradInput, and accGradParameters
 
 	fn get_gradient(&self, node_id : NodeId, wrt : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> Vec<f32> {
-		vec![]
-/*
 		match self.nodes[node_id].operation {
 			Operation::Input => {
 				vec![
@@ -114,17 +112,21 @@ impl Graph {
 				]	
 			},
 			Operation::MatrixMultiply(n1, n2) => {
-				let mut result = vec![0.0; a_height*b_width];
-				result
+				vec![] // TODO
 			},
-			Operation::BinaryElement(n1, n2, ref f) => {
-				result
+			Operation::BinaryElement(n1, n2, ref f, ref df) => {
+				vec![] // TODO
 			},
-			Operation::UnaryElement(n1, ref f) => {
-				result
+			Operation::UnaryElement(n1, ref f, ref df) => {
+				// d/dx [f(g(x))] = g'(x)*f'(g(x))
+				// Want to return d/dx f(a).
+				// wrt == n1, wrt == node_id, wrt != either.
+				// If wrt == n1, want to return df(n1).
+				// If wrt == node_id, ???
+				// If wrt != n1, it might be wrt some child of n1.
+				vec![] // TODO
 			}
 		}
-*/
 	}
 
 	// Node creation
@@ -174,6 +176,18 @@ impl Graph {
 		self.nodes.push(n);
 		let id = self.nodes.len()-1;
 		n.id = id;
+		id
+	}
+
+	fn new_hadamard_product(&mut self, node_a_id : NodeId, node_b_id : NodeId) -> NodeId { // Schur/Element-wise product.
+		assert_eq!(self.nodes[node_a_id].shape, self.nodes[node_b_id].shape);
+		let mut n = Node {
+			id : self.nodes.len(),
+			shape : self.nodes[node_a_id].shape.clone(),
+			operation : Operation::BinaryElement(node_a_id, node_b_id, Box::new(|x, y| { x*y }), Box::new(|x, y| { 0.0 }))
+		};
+		let id = n.id;
+		self.nodes.push(n);
 		id
 	}
 }
