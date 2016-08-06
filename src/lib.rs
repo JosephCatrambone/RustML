@@ -17,8 +17,8 @@ type NodeId = usize;
 enum Operation {
 	Input,
 	MatrixMultiply(NodeId, NodeId),
-	BinaryElement(NodeId, NodeId, Box<Fn(f32,f32)->f32>),
-	UnaryElement(NodeId, Box<Fn(f32)->f32>),
+	BinaryElement(NodeId, NodeId, Box<Fn(f32,f32)->f32>, Box<Fn(f32,f32)->f32>), // Node1, Node2, Fn, Derivative
+	UnaryElement(NodeId, Box<Fn(f32)->f32>, Box<Fn(f32)->f32>), // Node1, Fn, Derivative
 }
 
 struct Node {
@@ -42,7 +42,6 @@ impl Graph {
 
 	// Graph methods
 	fn get_output(&self, node_id : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> Vec<f32> {
-		//(node.operation)(&self, input_map)
 		match self.nodes[node_id].operation {
 			Operation::Input => { input_map.get(&node_id).unwrap().clone() },
 			Operation::MatrixMultiply(n1, n2) => {
@@ -74,7 +73,7 @@ impl Graph {
 
 				result
 			},
-			Operation::BinaryElement(n1, n2, ref f) => {
+			Operation::BinaryElement(n1, n2, ref f, _) => {
 				let a : Vec<f32> = self.get_output(n1, &input_map);
 				let b : Vec<f32> = self.get_output(n2, &input_map);
 				let mut result = vec![0.0; a.len()];
@@ -86,7 +85,7 @@ impl Graph {
 
 				result
 			},
-			Operation::UnaryElement(n1, ref f) => {
+			Operation::UnaryElement(n1, ref f, _) => {
 				let a : Vec<f32> = self.get_output(n1, &input_map);
 				let vec_len = a.len();			
 				let mut result = vec![0.0; vec_len];
@@ -97,6 +96,35 @@ impl Graph {
 				result
 			}
 		}
+	}
+
+	// TODO: Understand Tann's slides + Torch's updateOutput, updateGradInput, and accGradParameters
+
+	fn get_gradient(&self, node_id : NodeId, wrt : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> Vec<f32> {
+		vec![]
+/*
+		match self.nodes[node_id].operation {
+			Operation::Input => {
+				vec![
+					if node_id == wrt {
+						1.0
+					} else {
+						0.0
+					} ; self.nodes[node_id].shape.0*self.nodes[node_id].shape.1
+				]	
+			},
+			Operation::MatrixMultiply(n1, n2) => {
+				let mut result = vec![0.0; a_height*b_width];
+				result
+			},
+			Operation::BinaryElement(n1, n2, ref f) => {
+				result
+			},
+			Operation::UnaryElement(n1, ref f) => {
+				result
+			}
+		}
+*/
 	}
 
 	// Node creation
@@ -118,6 +146,30 @@ impl Graph {
 			shape : (self.nodes[node_a_id].shape.0, self.nodes[node_b_id].shape.1),
 			//operation : Operation::BinaryElement(node_a_id, node_b_id, Box::new(|a, b| { 0.0 })),
 			operation : Operation::MatrixMultiply(node_a_id, node_b_id),
+		};
+		self.nodes.push(n);
+		let id = self.nodes.len()-1;
+		n.id = id;
+		id
+	}
+
+	fn new_inverse(&mut self, node_id : NodeId) -> NodeId {
+		let mut n = Node {
+			id: 0,
+			shape : self.nodes[node_id].shape,
+			operation : Operation::UnaryElement(node_id, Box::new(|x| { 1.0/x }), Box::new(|x| {x.ln()}) ),
+		};
+		self.nodes.push(n);
+		let id = self.nodes.len()-1;
+		n.id = id;
+		id
+	}
+
+	fn new_scalar_broadcast(&mut self, node_id : NodeId, scalar : f32) -> NodeId {
+		let mut n = Node {
+			id : 0,
+			shape : (self.nodes[node_id].shape.0, self.nodes[node_id].shape.1),
+			operation : Operation::UnaryElement(node_id, Box::new(move |x| { x+scalar }), Box::new(move |x| { x + scalar })),
 		};
 		self.nodes.push(n);
 		let id = self.nodes.len()-1;
