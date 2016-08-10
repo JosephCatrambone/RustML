@@ -1,4 +1,9 @@
 
+/***
+ * Standard reverse-mode automatic differentiation system.
+ * Uses backwards diff to compute derivative WRT some variable at a given interval.
+ */
+
 use std::f32;
 use std::vec;
 use std::collections::HashMap;
@@ -14,11 +19,26 @@ type NodeId = usize;
 
 //		ActivationFunction::Sigmoid => 1.0f32/(1.0 + (-value).exp()),
 
+/*
+fn unary_operation(a : &Vec<f32>, c : &mut Vec<f32>, op : Box<Fn(f32)->f32>) {
+	for i in 0..c.len() {
+		c[i] = op(a);
+	}
+}
+
+let foo = Box::new(|x| { x*2 })
+*/
+
 enum Operation {
 	Input,
 	MatrixMultiply(NodeId, NodeId),
-	BinaryElement(NodeId, NodeId, Box<Fn(f32,f32)->f32>, Box<Fn(f32,f32)->f32>), // Node1, Node2, Fn, Derivative
-	UnaryElement(NodeId, Box<Fn(f32)->f32>, Box<Fn(f32)->f32>), // Node1, Fn, Derivative
+	ConstantAdd(NodeId, f32),
+	ConstantMultiply(NodeId, f32),
+	ElementAdd(NodeId, NodeId),
+	ElementMultiply(NodeId, NodeId),
+	ElementInverse(NodeId),
+	Sigmoid(NodeId),
+	// TODO: Find out if elementInverse(constantAdd(1, elementExp(elementMultiply(-1, input)))) == d/dx sigmoid
 }
 
 struct Node {
@@ -73,25 +93,53 @@ impl Graph {
 
 				result
 			},
-			Operation::BinaryElement(n1, n2, ref f, _) => {
-				let a : Vec<f32> = self.get_output(n1, &input_map);
-				let b : Vec<f32> = self.get_output(n2, &input_map);
+			Operation::ConstantAdd(node, scalar) => {
+				let a : Vec<f32> = self.get_output(node, &input_map);
 				let mut result = vec![0.0; a.len()];
-				let vec_len = result.len();			
-
-				for i in 0..vec_len {
-					result[i] = f(a[i], b[i]);
+				for i in 0..a.len() {
+					result[i] = a[i]+scalar;
 				}
-
 				result
 			},
-			Operation::UnaryElement(n1, ref f, _) => {
-				let a : Vec<f32> = self.get_output(n1, &input_map);
-				let vec_len = a.len();			
-				let mut result = vec![0.0; vec_len];
-			
-				for i in 0..vec_len {
-					result[i] = f(a[i]);
+			Operation::ConstantMultiply(node, scalar) => {
+				let a : Vec<f32> = self.get_output(node, &input_map);
+				let mut result = vec![0.0; a.len()];
+				for i in 0..a.len() {
+					result[i] = a[i]*scalar;
+				}
+				result
+			},
+			Operation::ElementAdd(node_a_id, node_b_id) => { 
+				let a : Vec<f32> = self.get_output(node_a_id, &input_map);
+				let b : Vec<f32> = self.get_output(node_b_id, &input_map);
+				let mut result = vec![0.0; a.len()];
+				for i in 0..a.len() {
+					result[i] = a[i]+b[i];
+				}
+				result
+			},
+			Operation::ElementMultiply(node_a_id, node_b_id) => {
+				let a : Vec<f32> = self.get_output(node_a_id, &input_map);
+				let b : Vec<f32> = self.get_output(node_b_id, &input_map);
+				let mut result = vec![0.0; a.len()];
+				for i in 0..a.len() {
+					result[i] = a[i]*b[i];
+				}
+				result
+			},
+			Operation::ElementInverse(node) => {
+				let a : Vec<f32> = self.get_output(node, &input_map);
+				let mut result = vec![0.0; a.len()];
+				for i in 0..a.len() {
+					result[i] = 1.0/a[i];
+				}
+				result
+			},
+			Operation::Sigmoid(node) => {
+				let a : Vec<f32> = self.get_output(node, &input_map);
+				let mut result = vec![0.0; a.len()];
+				for i in 0..a.len() {
+					result[i] = 1.0/(1.0+(-a[i]).exp());
 				}
 				result
 			}
@@ -114,23 +162,71 @@ impl Graph {
 			Operation::MatrixMultiply(n1, n2) => {
 				vec![] // TODO
 			},
-			Operation::BinaryElement(n1, n2, ref f, ref df) => {
-				vec![] // TODO
+			Operation::ConstantAdd(node, scalar) => {
+				let vec_len = self.nodes[node_id].shape.0*self.nodes[node_id].shape.1;
+				// d/dx c*x = c
+				// d/dx c*y = 0
+				// TODO: Raise exception if someone passes wrt as node_id, because d/dx f(+) makes no sense.
+				if wrt == node {
+					vec![scalar; vec_len]
+				} else {
+					vec![0.0; vec_len]
+				}
 			},
-			Operation::UnaryElement(n1, ref f, ref df) => {
-				// d/dx [f(g(x))] = g'(x)*f'(g(x))
-				// Want to return d/dx f(a).
-				// wrt == n1, wrt == node_id, wrt != either.
-				// If wrt == n1, want to return df(n1).
-				// If wrt == node_id, ???
-				// If wrt != n1, it might be wrt some child of n1.
-				vec![] // TODO
+			Operation::ConstantMultiply(node, scalar) => {
+				let a : Vec<f32> = self.get_output(node, &input_map);
+				let mut result = vec![0.0; a.len()];
+				for i in 0..a.len() {
+					result[i] = a[i]*scalar;
+				}
+				result
+			},
+			Operation::ElementAdd(node_a_id, node_b_id) => { 
+				// TODO
+				let a : Vec<f32> = self.get_output(node_a_id, &input_map);
+				let b : Vec<f32> = self.get_output(node_b_id, &input_map);
+				let mut result = vec![0.0; a.len()];
+				for i in 0..a.len() {
+					result[i] = a[i]+b[i];
+				}
+				result
+			},
+			Operation::ElementMultiply(node_a_id, node_b_id) => {
+				// TODO
+				let a : Vec<f32> = self.get_output(node_a_id, &input_map);
+				let b : Vec<f32> = self.get_output(node_b_id, &input_map);
+				let mut result = vec![0.0; a.len()];
+				for i in 0..a.len() {
+					result[i] = a[i]*b[i];
+				}
+				result
+			},
+			Operation::ElementInverse(node) => {
+				// TODO
+				let a : Vec<f32> = self.get_output(node, &input_map);
+				let mut result = vec![0.0; a.len()];
+				for i in 0..a.len() {
+					result[i] = 1.0/a[i];
+				}
+				result
+			},
+			Operation::Sigmoid(node) => {
+				// TODO:
+				let a : Vec<f32> = self.get_output(node, &input_map);
+				let mut result = vec![0.0; a.len()];
+				for i in 0..a.len() {
+					result[i] = 1.0/(1.0+(-a[i]).exp());
+				}
+				result
 			}
 		}
 	}
 
+	// TODO:
+	//fn get_output_shape(&self, node_id : NodeId) {}
+
 	// Node creation
-	fn new_input(&mut self, shape : Dimension) -> NodeId {
+	fn input(&mut self, shape : Dimension) -> NodeId {
 		let mut n = Node {
 			id : 0,
 			shape : shape,
@@ -142,7 +238,29 @@ impl Graph {
 		id
 	}
 
-	fn new_matmul(&mut self, node_a_id : NodeId, node_b_id : NodeId) -> NodeId {
+	fn insert_op(&mut self, shape_ref : NodeId, op : Operation) -> NodeId {
+		let mut n = Node {
+			id : self.nodes.len(),
+			shape : self.nodes[shape_ref].shape,
+			operation : op
+		};
+		let id = n.id;
+		self.nodes.push(n);
+		id
+	}
+
+	fn insert_op_with_shape(&mut self, shape : Dimension, op : Operation) -> NodeId {
+		let mut n = Node {
+			id : self.nodes.len(),
+			shape : shape,
+			operation : op
+		};
+		let id = n.id;
+		self.nodes.push(n);
+		id
+	}
+
+	fn matmul(&mut self, node_a_id : NodeId, node_b_id : NodeId) -> NodeId {
 		let mut n = Node {
 			id : 0,
 			shape : (self.nodes[node_a_id].shape.0, self.nodes[node_b_id].shape.1),
@@ -155,40 +273,22 @@ impl Graph {
 		id
 	}
 
-	fn new_inverse(&mut self, node_id : NodeId) -> NodeId {
-		let mut n = Node {
-			id: 0,
-			shape : self.nodes[node_id].shape,
-			operation : Operation::UnaryElement(node_id, Box::new(|x| { 1.0/x }), Box::new(|x| {x.ln()}) ),
-		};
-		self.nodes.push(n);
-		let id = self.nodes.len()-1;
-		n.id = id;
-		id
+	// Convenience methods:
+	fn inverse(&mut self, node_id : NodeId) -> NodeId {
+		self.insert_op(node_id, Operation::ElementInverse(node_id))
 	}
 
-	fn new_scalar_broadcast(&mut self, node_id : NodeId, scalar : f32) -> NodeId {
-		let mut n = Node {
-			id : 0,
-			shape : (self.nodes[node_id].shape.0, self.nodes[node_id].shape.1),
-			operation : Operation::UnaryElement(node_id, Box::new(move |x| { x+scalar }), Box::new(move |x| { x + scalar })),
-		};
-		self.nodes.push(n);
-		let id = self.nodes.len()-1;
-		n.id = id;
-		id
+	fn constant_add(&mut self, node_id : NodeId, scalar : f32) -> NodeId {
+		self.insert_op(node_id, Operation::ConstantAdd(node_id, scalar))
 	}
 
-	fn new_hadamard_product(&mut self, node_a_id : NodeId, node_b_id : NodeId) -> NodeId { // Schur/Element-wise product.
+	fn constant_multiply(&mut self, node_id : NodeId, scalar : f32) -> NodeId {
+		self.insert_op(node_id, Operation::ConstantMultiply(node_id, scalar))
+	}
+
+	fn hadamard_product(&mut self, node_a_id : NodeId, node_b_id : NodeId) -> NodeId { // Schur/Element-wise product.
 		assert_eq!(self.nodes[node_a_id].shape, self.nodes[node_b_id].shape);
-		let mut n = Node {
-			id : self.nodes.len(),
-			shape : self.nodes[node_a_id].shape.clone(),
-			operation : Operation::BinaryElement(node_a_id, node_b_id, Box::new(|x, y| { x*y }), Box::new(|x, y| { 0.0 }))
-		};
-		let id = n.id;
-		self.nodes.push(n);
-		id
+		self.insert_op(node_a_id, Operation::ElementMultiply(node_a_id, node_b_id))
 	}
 }
 
@@ -202,11 +302,11 @@ mod tests {
 		// Build graph
 		let mut input = HashMap::new();
 		let mut g = Graph::new();
-		let m : NodeId = g.new_input((3, 3));
-		let n : NodeId = g.new_input((1, 3));
-		let o = g.new_matmul(n, m);
-		let j : NodeId = g.new_input((3, 5));
-		let k = g.new_matmul(m, j);
+		let m : NodeId = g.input((3, 3));
+		let n : NodeId = g.input((1, 3));
+		let o = g.matmul(n, m);
+		let j : NodeId = g.input((3, 5));
+		let k = g.matmul(m, j);
 
 		// Shape check
 		assert_eq!(g.nodes[m].shape, (3, 3));
@@ -239,6 +339,28 @@ mod tests {
 		for i in 0..15 {
 			assert_eq!(res2[i], (i as f32+1.0));
 		}
+	}
+
+	#[test]
+	fn test_autodiff_simple() {
+		let mut g = Graph::new();
+		let a = g.input((2, 3));
+		let b = g.constant_add(a, 10.0);
+		
+		let mut input = HashMap::new();
+		input.insert(a, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+		let res = g.get_output(b, &input);
+		let dres_da = g.get_gradient(b, a, &input);
+		let dres_db = g.get_gradient(b, b, &input);
+		assert_eq!(dres_da[0], 10.0);
+		assert_eq!(dres_db[0], 0.0);
+	}
+
+	#[test]
+	fn test_backprop() {
+		let mut g = Graph::new();
+		let x = g.input((1, 10));
 	}
 
     #[test]
