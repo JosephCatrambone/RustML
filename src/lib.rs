@@ -17,8 +17,6 @@ static KERNEL_SOURCE: &'static str = include_str!("kernel_source.cl");
 type Dimension = (usize, usize);
 type NodeId = usize;
 
-//		ActivationFunction::Sigmoid => 1.0f32/(1.0 + (-value).exp()),
-
 /*
 fn unary_operation(a : &Vec<f32>, c : &mut Vec<f32>, op : Box<Fn(f32)->f32>) {
 	for i in 0..c.len() {
@@ -37,8 +35,9 @@ enum Operation {
 	ElementAdd(NodeId, NodeId),
 	ElementMultiply(NodeId, NodeId),
 	ElementInverse(NodeId),
-	Sigmoid(NodeId),
-	// TODO: Find out if elementInverse(constantAdd(1, elementExp(elementMultiply(-1, input)))) == d/dx sigmoid
+
+	Unary(NodeId, Box<Fn(f32)->f32>, Box<Fn(f32)->f32>), // x, f, df/dx
+	Binary(NodeId, NodeId, Box<Fn(f32,f32)->f32>, Box<Fn(f32,f32)->f32>, Box<Fn(f32,f32)->f32>), // LHS, RHS, F, dF/dLHS, dF/dRHS
 }
 
 struct Node {
@@ -135,95 +134,139 @@ impl Graph {
 				}
 				result
 			},
-			Operation::Sigmoid(node) => {
-				let a : Vec<f32> = self.get_output(node, &input_map);
+			Operation::Unary(node_id, ref f, _) => {
+				let a : Vec<f32> = self.get_output(node_id, &input_map);
 				let mut result = vec![0.0; a.len()];
 				for i in 0..a.len() {
-					result[i] = 1.0/(1.0+(-a[i]).exp());
+					result[i] = f(a[i]);
 				}
 				result
-			}
+			},
+			Operation::Binary(node_a_id, node_b_id, ref f, _, _) => { // LHS, RHS, F, dF/dLHS, dF/dRHS
+				let a : Vec<f32> = self.get_output(node_a_id, &input_map);
+				let b : Vec<f32> = self.get_output(node_b_id, &input_map);
+				let mut result = vec![0.0; a.len()];
+				for i in 0..a.len() {
+					result[i] = f(a[i], b[i]);
+				}
+				result
+			},
 		}
 	}
 
 	// TODO: Understand Tann's slides + Torch's updateOutput, updateGradInput, and accGradParameters
 
-	fn get_gradient(&self, node_id : NodeId, wrt : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> Vec<f32> {
+	fn get_output_with_gradient(&self, node_id : NodeId, wrt : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> (Vec<f32>, Vec<f32>) {
+		// If we use infintesimals when calculating forward gradient, we get these:
+		// (x + x'eps) + (y + y'eps) = (x+y, (x'+y')eps)
+		// (x + x'eps) * (y + y'eps) = xy + xy'eps + x'yeps + x'y'eps^2 = xy + (xy' + x'y)eps
+		// If this is the derivative of something WRT (this node), the epsilon residual is 1.0.
+		// ELSE it's 0.
+		// In general, g(<u,u'>, <v, v'>) = <g(u,v) , dg/du(u,v)*u' + dg/dv(u,v)*v'>
+
 		match self.nodes[node_id].operation {
 			Operation::Input => {
-				vec![
-					if node_id == wrt {
-						1.0
-					} else {
-						0.0
-					} ; self.nodes[node_id].shape.0*self.nodes[node_id].shape.1
-				]	
+				let len = self.nodes[node_id].shape.0 * self.nodes[node_id].shape.1;
+				if node_id == wrt {
+					(input_map.get(&node_id).unwrap().clone(), vec![1.0; len])
+				} else {
+					(input_map.get(&node_id).unwrap().clone(), vec![0.0; len])
+				}
 			},
 			Operation::MatrixMultiply(n1, n2) => {
-				vec![] // TODO
+				panic!("Not yet implemented.");
+				(vec![], vec![]) // TODO
 			},
 			Operation::ConstantAdd(node, scalar) => {
+				let (mut real, mut residual) = self.get_output_with_gradient(node, wrt, &input_map);
+
 				let vec_len = self.nodes[node_id].shape.0*self.nodes[node_id].shape.1;
-				// d/dx c*x = c
-				// d/dx c*y = 0
-				// TODO: Raise exception if someone passes wrt as node_id, because d/dx f(+) makes no sense.
-				if wrt == node {
-					vec![scalar; vec_len]
-				} else {
-					vec![0.0; vec_len]
+				
+				// First, compute the epsilon values.
+				// (x + x'eps) + (scalar, 0eps) with broadcast.
+				for i in 0..vec_len {
+					real[i] += scalar;
+					//residual[i] += 0; // Since this is a const.
 				}
+
+				(real, residual)
 			},
 			Operation::ConstantMultiply(node, scalar) => {
-				let a : Vec<f32> = self.get_output(node, &input_map);
-				let mut result = vec![0.0; a.len()];
-				for i in 0..a.len() {
-					result[i] = a[i]*scalar;
+				// (x + x'eps) * (y + y'eps) -> (xy) + (xy'eps) + (x'yeps) + (x'y'eps^2) -> (xy) + (xy'eps) + (x'yeps)
+				// (xy) + (xy' + x'y)eps
+				// Since y is a constant scalar, yeps = 0 and y' is zero.
+				// (x + x_res) * (y + 0) -> (xy + x_res*y)
+				let (mut real, mut residual) = self.get_output_with_gradient(node, wrt, &input_map);
+				for i in 0..real.len() {
+					real[i] *= scalar;
+					residual[i] *= scalar;
 				}
-				result
+				(real, residual)
 			},
 			Operation::ElementAdd(node_a_id, node_b_id) => { 
-				// TODO
-				let a : Vec<f32> = self.get_output(node_a_id, &input_map);
-				let b : Vec<f32> = self.get_output(node_b_id, &input_map);
-				let mut result = vec![0.0; a.len()];
-				for i in 0..a.len() {
-					result[i] = a[i]+b[i];
+				// (x + x'eps) + (y + y'eps) = (x+y, (x'+y')eps)
+				let (a_real, a_residual) = self.get_output_with_gradient(node_a_id, wrt, &input_map);
+				let (b_real, b_residual) = self.get_output_with_gradient(node_b_id, wrt, &input_map);
+				let mut real = vec![0.0; a_real.len()];
+				let mut residual = vec![0.0; a_real.len()];
+				for i in 0..a_real.len() {
+					real[i] = a_real[i]+b_real[i];
+					residual[i] = a_residual[i]+b_residual[i];
 				}
-				result
+				(real, residual)
 			},
 			Operation::ElementMultiply(node_a_id, node_b_id) => {
-				// TODO
-				let a : Vec<f32> = self.get_output(node_a_id, &input_map);
-				let b : Vec<f32> = self.get_output(node_b_id, &input_map);
-				let mut result = vec![0.0; a.len()];
-				for i in 0..a.len() {
-					result[i] = a[i]*b[i];
+				// (x + x'eps) * (y + y'eps) = xy + xy'eps + x'yeps + x'y'eps^2 = xy + (xy' + x'y)eps
+				let (a_real, a_residual) = self.get_output_with_gradient(node_a_id, wrt, &input_map);
+				let (b_real, b_residual) = self.get_output_with_gradient(node_b_id, wrt, &input_map);
+				let mut real = vec![0.0; a_real.len()];
+				let mut residual = vec![0.0; a_real.len()];
+				for i in 0..a_real.len() {
+					real[i] = a_real[i]*b_real[i];
+					residual[i] = a_real[i]*b_residual[i] + a_residual[i]*b_real[i];
 				}
-				result
+				(real, residual)
 			},
 			Operation::ElementInverse(node) => {
-				// TODO
-				let a : Vec<f32> = self.get_output(node, &input_map);
-				let mut result = vec![0.0; a.len()];
-				for i in 0..a.len() {
-					result[i] = 1.0/a[i];
+				// <u, u'> / <v, v'> = < u/v, u'v - uv'/v^2>
+				// Let u = (1.0, 0.0)
+				// u' = 0.0
+				// v = a_real
+				// v' = a_res
+				// u'v - uv' -> -1.0*a_res / a_real*a_real
+				let (a_real, a_res) = self.get_output_with_gradient(node, wrt, &input_map);
+				let mut result = vec![0.0; a_real.len()];
+				let mut residual = vec![0.0; a_real.len()];
+				for i in 0..a_real.len() {
+					result[i] = 1.0/a_real[i];
+					residual[i] = (-1.0*a_res[i])/(a_real[i]*a_real[i]);
 				}
-				result
+				(result, residual)
 			},
-			Operation::Sigmoid(node) => {
-				// TODO:
-				let a : Vec<f32> = self.get_output(node, &input_map);
-				let mut result = vec![0.0; a.len()];
-				for i in 0..a.len() {
-					result[i] = 1.0/(1.0+(-a[i]).exp());
+			Operation::Unary(node_id, ref f, ref dfdx) => {
+				let (a_real, a_res) = self.get_output_with_gradient(node_id, wrt, &input_map);
+				let mut result = vec![0.0; a_real.len()];
+				let mut residual = vec![0.0; a_real.len()];
+				for i in 0..a_real.len() {
+					result[i] = f(a_real[i]);
+					residual[i] = dfdx(a_real[i])*a_res[i];
 				}
-				result
-			}
+				(result, residual)
+			},
+			Operation::Binary(node_a_id, node_b_id, ref f, ref dfda, ref dfdb) => { // LHS, RHS, F, dF/dLHS, dF/dRHS
+				// g( <a_real, a_res>, <b_real, b_res> ) = < g(a_real, b_real), dgda(a_real, b_real)*da + dgdb(a_real, b_real)*db>
+				let (a_real, a_res) = self.get_output_with_gradient(node_a_id, wrt, &input_map);
+				let (b_real, b_res) = self.get_output_with_gradient(node_b_id, wrt, &input_map);
+				let mut result_real = vec![0.0; a_real.len()];
+				let mut result_residual = vec![0.0; a_real.len()];
+				for i in 0..a_real.len() {
+					result_real[i] = f(a_real[i], b_real[i]);
+					result_residual[i] = dfda(a_real[i], b_real[i])*a_res[i] + dfdb(a_real[i], b_real[i])*b_res[i];
+				}
+				(result_real, result_residual)
+			},
 		}
 	}
-
-	// TODO:
-	//fn get_output_shape(&self, node_id : NodeId) {}
 
 	// Node creation
 	fn input(&mut self, shape : Dimension) -> NodeId {
@@ -286,9 +329,29 @@ impl Graph {
 		self.insert_op(node_id, Operation::ConstantMultiply(node_id, scalar))
 	}
 
+	fn power(&mut self, node_id : NodeId, scalar : f32) -> NodeId {
+		self.insert_op(node_id, Operation::Unary(
+			node_id,
+			Box::new(move |x| { x.powf(scalar) }),
+			Box::new(move |x| { scalar*x.powf(scalar-1.0) }),
+		))
+	}
+
+	fn add(&mut self, node_a_id : NodeId, node_b_id : NodeId) -> NodeId {
+		self.insert_op(node_a_id, Operation::ElementAdd(node_a_id, node_b_id))
+	}
+
 	fn hadamard_product(&mut self, node_a_id : NodeId, node_b_id : NodeId) -> NodeId { // Schur/Element-wise product.
 		assert_eq!(self.nodes[node_a_id].shape, self.nodes[node_b_id].shape);
 		self.insert_op(node_a_id, Operation::ElementMultiply(node_a_id, node_b_id))
+	}
+
+	fn sigmoid(&mut self, node_id : NodeId) -> NodeId {
+		self.insert_op(node_id, Operation::Unary(
+			node_id, 
+			Box::new(|x| { 1.0/(1.0 + (-x).exp()) }), 
+			Box::new(|x| { 0.0 })
+		))
 	}
 }
 
@@ -346,15 +409,69 @@ mod tests {
 		let mut g = Graph::new();
 		let a = g.input((2, 3));
 		let b = g.constant_add(a, 10.0);
+		let c = g.constant_multiply(a, 2.0);
 		
 		let mut input = HashMap::new();
 		input.insert(a, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 
 		let res = g.get_output(b, &input);
-		let dres_da = g.get_gradient(b, a, &input);
-		let dres_db = g.get_gradient(b, b, &input);
-		assert_eq!(dres_da[0], 10.0);
-		assert_eq!(dres_db[0], 0.0);
+		let (a_val, db_val_wrt_a) = g.get_output_with_gradient(b, a, &input);
+		let (a_val_2, db_val_wrt_b) = g.get_output_with_gradient(b, b, &input);
+		let (a_val_3, dc_val_wrt_a) = g.get_output_with_gradient(c, a, &input);
+		assert_eq!(a_val[0], 11.0);
+		assert_eq!(a_val_2[0], 11.0);
+		assert_eq!(db_val_wrt_a[0], 1.0); // d/dx x+10 = 1
+		assert_eq!(db_val_wrt_b[0], 0.0); // d/dy x+10 = 0
+		assert_eq!(dc_val_wrt_a[0], 2.0); // d/dx x*2 = 2  
+	}
+
+	#[test]
+	fn test_gradient() {
+		const EPSILON : f32= 0.0001;
+		let mut g = Graph::new();
+		// f(x) = x^3 + 3*x - 1.0/x + yx + y + 10
+		// TODO: 2^x and e^x and y^x
+		// df/dx (x) = 3*x^2 + 3 + 1/x^2 + y
+		let x = g.input((1, 10)); // One row, ten column input.
+		let y = g.input((1, 10));
+		// x^3 node 1.
+		let a = g.power(x, 3.0);
+
+		// 3*x
+		let b = g.constant_multiply(x, 3.0);
+
+		// 1.0/x
+		let c = g.inverse(x);
+
+		// y*x
+		let d = g.hadamard_product(x, y);
+
+		// (x^3 + 3*x)
+		let ab = g.add(a, b);
+
+		// (-1.0/x + yx)
+		let c2 = g.constant_multiply(c, -1.0);
+		let cd = g.add(c2, d);
+
+		// (x^3 + 3*x + -1.0/x + yx)
+		let abcd = g.add(ab, cd);
+
+		// ... + y
+		let abcde = g.add(abcd, y);
+		let abcdef = g.constant_add(abcde, 10.0);
+		
+		let mut input = HashMap::new();
+		input.insert(x, vec![-10.0, -1.0, -0.1, 0.000001, 0.1, 1.0, 10.0, 8.0, 9.0, 1.0]);
+		input.insert(y, vec![-5.0, -2.0, -0.5, 1.0, 0.5, 2.0, 5.0, 8.0, 9.0, 1.0]);
+
+		let expected_result = vec![-974.9000000000001, 7.0, 19.249000000000002, -999988.999996, 0.8510000000000009, 17.0, 1094.9, 617.875, 855.8888888888889, 15.0];
+		let expected_grad = vec![298.01, 5.0, 102.52999999999999, 1000000000004.0, 103.52999999999999, 9.0, 308.01, 203.015625, 255.01234567901236, 8.0];
+
+		let (fx, dfdx) = g.get_output_with_gradient(abcdef, x, &input);
+		for i in 0..10 {
+			assert!((fx[i] - expected_result[i]).abs() <= EPSILON);
+			assert!((dfdx[i] - expected_grad[i]).abs() <= EPSILON);
+		}
 	}
 
 	#[test]
