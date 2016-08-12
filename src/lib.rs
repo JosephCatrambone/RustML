@@ -17,16 +17,6 @@ static KERNEL_SOURCE: &'static str = include_str!("kernel_source.cl");
 type Dimension = (usize, usize);
 type NodeId = usize;
 
-/*
-fn unary_operation(a : &Vec<f32>, c : &mut Vec<f32>, op : Box<Fn(f32)->f32>) {
-	for i in 0..c.len() {
-		c[i] = op(a);
-	}
-}
-
-let foo = Box::new(|x| { x*2 })
-*/
-
 enum Operation {
 	Input,
 	MatrixMultiply(NodeId, NodeId),
@@ -154,8 +144,6 @@ impl Graph {
 		}
 	}
 
-	// TODO: Understand Tann's slides + Torch's updateOutput, updateGradInput, and accGradParameters
-
 	fn get_output_with_gradient(&self, node_id : NodeId, wrt : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> (Vec<f32>, Vec<f32>) {
 		// If we use infintesimals when calculating forward gradient, we get these:
 		// (x + x'eps) + (y + y'eps) = (x+y, (x'+y')eps)
@@ -174,8 +162,38 @@ impl Graph {
 				}
 			},
 			Operation::MatrixMultiply(n1, n2) => {
-				panic!("Not yet implemented.");
-				(vec![], vec![]) // TODO
+				// Verify shapes
+				let a_width = self.nodes[n1].shape.1; // Columns (j)
+				let a_height = self.nodes[n1].shape.0; // Rows (i)
+				let b_width = self.nodes[n2].shape.1; // Columns (k)
+				let b_height = self.nodes[n2].shape.0; // Rows (j)
+				let c_width = b_width;
+				let c_height = a_height;
+				assert_eq!(a_width, b_height);
+
+				let (a_real, a_residual) = self.get_output_with_gradient(n1, wrt, &input_map);
+				let (b_real, b_residual) = self.get_output_with_gradient(n2, wrt, &input_map);
+
+				let mut result = vec![0.0; a_real.len()];
+				let mut residual = vec![0.0; a_real.len()];
+
+				// Multiply
+				for i in 0..a_height { // Column [Iterating over row]
+					for k in 0..b_width { // Row/Width [Iterating over column]
+						let mut accumulator = 0.0;
+						let mut residual_accumulator = 0.0;
+						for j in 0..a_width { // Column
+							let a_pos = j+i*a_width;
+							let b_pos = k+j*b_width;
+							accumulator += a_real[a_pos]*b_real[b_pos];
+							residual_accumulator += a_real[a_pos]*b_residual[b_pos] + a_residual[a_pos]*b_real[b_pos];
+						}
+						result[k + i*c_width] = accumulator;
+						residual[k + i*c_width] = residual_accumulator;
+					}
+				}
+
+				(result, residual)
 			},
 			Operation::ConstantAdd(node, scalar) => {
 				let (mut real, mut residual) = self.get_output_with_gradient(node, wrt, &input_map);
@@ -350,7 +368,7 @@ impl Graph {
 		self.insert_op(node_id, Operation::Unary(
 			node_id, 
 			Box::new(|x| { 1.0/(1.0 + (-x).exp()) }), 
-			Box::new(|x| { 0.0 })
+			Box::new(|x| { 1.0/(1.0 + (-x).exp()) * (1.0 - (1.0/(1.0 + (-x).exp()))) }) // if f(x) = sigmoid, df/dx = f(x) * (1-f(x))
 		))
 	}
 }
@@ -426,7 +444,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_gradient() {
+	fn test_autodiff_complex() {
 		const EPSILON : f32= 0.0001;
 		let mut g = Graph::new();
 		// f(x) = x^3 + 3*x - 1.0/x + yx + y + 10
@@ -472,6 +490,53 @@ mod tests {
 			assert!((fx[i] - expected_result[i]).abs() <= EPSILON);
 			assert!((dfdx[i] - expected_grad[i]).abs() <= EPSILON);
 		}
+	}
+
+	#[test]
+	fn numerical_gradient_check() {
+		const DELTA : f32 = 0.001;
+		const EPSILON : f32 = 0.01;
+		let mut g = Graph::new();
+		let x = g.input((1, 3));
+
+		// This can be whatever method.
+		let op = g.sigmoid(x);
+
+		let mut input = HashMap::new();
+		for i in -100..100 {
+			let j = (i as f32)/50.0;
+			let x0 = j-DELTA;
+			let x1 = j;
+			let x2 = j+DELTA;
+
+			input.insert(x, vec![x0, x1, x2]);
+
+			let (out, outgrad) = g.get_output_with_gradient(op, x, &input);
+			let numerical_grad = (out[2] - out[0]) / (x2 - x0);
+
+			//println!("{:?} : {:?} {:?}", &[x0, x1, x2], &out, &outgrad);
+			println!("f({}) -- Calculated gradient : {}.  Numerical approximation : {}.", j, outgrad[1], numerical_grad);
+			assert!( (outgrad[1]-numerical_grad).abs() < EPSILON );
+		}
+	}
+
+	#[test]
+	fn test_matrix_multiply_gradient() {
+		let mut g = Graph::new();
+		let x = g.input((10, 10));
+		let y = g.input((10, 10));
+
+		let mut input : HashMap<usize, Vec<f32>> = HashMap::new();
+		let mm = g.matmul(x, y);
+		let x_data: Vec<f32> = (0..100u32).map(|i| i as f32).collect(); // Get rid of the map for just an array of ints.
+		let y_data: Vec<f32> = (0..100u32).map(|i| 100.0 - i as f32).collect(); 
+		
+		input.insert(x, x_data.clone());
+		input.insert(y, y_data.clone());
+		let d_wrt_x = g.get_output_with_gradient(mm, x, &input);
+		let d_wrt_y = g.get_output_with_gradient(mm, y, &input);
+		assert!(d_wrt_x.1 == y_data);
+		assert!(d_wrt_y.1 == x_data);
 	}
 
 	#[test]
