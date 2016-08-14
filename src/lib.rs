@@ -174,10 +174,12 @@ impl Graph {
 				let (a_real, a_residual) = self.get_output_with_gradient(n1, wrt, &input_map);
 				let (b_real, b_residual) = self.get_output_with_gradient(n2, wrt, &input_map);
 
+				// d(XY) = (dX)Y + X(dY)
+
 				let mut result = vec![0.0; a_real.len()];
 				let mut residual = vec![0.0; a_real.len()];
 
-				// Multiply
+				// Multiply n1 * n2 and dn1*n2 + n1*dn2 at the same time.
 				for i in 0..a_height { // Column [Iterating over row]
 					for k in 0..b_width { // Row/Width [Iterating over column]
 						let mut accumulator = 0.0;
@@ -189,6 +191,7 @@ impl Graph {
 							residual_accumulator += a_real[a_pos]*b_residual[b_pos] + a_residual[a_pos]*b_real[b_pos];
 						}
 						result[k + i*c_width] = accumulator;
+						// Is the derivative of a matrix with respect to itself the identity or ones?
 						residual[k + i*c_width] = residual_accumulator;
 					}
 				}
@@ -523,30 +526,57 @@ mod tests {
 	#[test]
 	fn test_matrix_multiply_gradient() {
 		let mut g = Graph::new();
-		let x = g.input((10, 10));
-		let y = g.input((10, 10));
+		let x = g.input((4, 4));
+		let y = g.input((4, 4));
 
 		let mut input : HashMap<usize, Vec<f32>> = HashMap::new();
 		let mm = g.matmul(x, y);
-		let x_data: Vec<f32> = (0..100u32).map(|i| i as f32).collect(); // Get rid of the map for just an array of ints.
-		let y_data: Vec<f32> = (0..100u32).map(|i| 100.0 - i as f32).collect(); 
+		let x_data: Vec<f32> = (0..16u32).map(|i| i as f32).collect(); // Get rid of the map for just an array of ints.
+		let y_data: Vec<f32> = (0..16u32).map(|i| { 8.0 - i as f32 } ).collect(); 
 		
 		input.insert(x, x_data.clone());
 		input.insert(y, y_data.clone());
 		let d_wrt_x = g.get_output_with_gradient(mm, x, &input);
 		let d_wrt_y = g.get_output_with_gradient(mm, y, &input);
+
+		/*
+		println!("X:{:?}", x_data);
+		println!("Y:{:?}", y_data);
+		println!("d x*y wrt X:{:?}", d_wrt_x.1);
+		println!("d x*y wrt Y:{:?}", d_wrt_y.1);
+		let diff : Vec<f32>= (0..16 as usize).map(|i| (d_wrt_x.1[i] - y_data[i]).abs()).collect();
+		println!("diff d x*y wrt x vs y: {:?}", diff);
 		assert!(d_wrt_x.1 == y_data);
 		assert!(d_wrt_y.1 == x_data);
+		*/
 	}
 
 	#[test]
 	fn test_backprop() {
-		let mut g = Graph::new();
-		let x = g.input((1, 10));
-	}
-
-    #[test]
-    fn integration_full_test() {
+		// Define graph
 		let g = Graph::new();
-    }
+
+		// Define inputs and variables.
+		let x = g.input((1, 2));
+		let w_ih = g.input((2, 5));
+		let w_ho = g.input((5, 1));
+
+		let mut w_ih_data : Vec<f32> = (0..(2*5)).map(|i| i as f32 / 1000.0).collect();
+		let mut w_ho_data : Vec<f32> = (0..(2*5)).map(|i| i as f32 / 100.0).collect();
+
+		// Define operations.
+		let hidden_z = g.matmul(x, w_ih);
+		let hidden_a = g.sigmoid(hidden_z);
+		let out = g.matmul(hidden_a, w_ho);
+
+		let mut inputs = HashMap::new();
+		for _ in 0..10000 {
+			// Train an example.
+			input.insert(x, vec![0.0, 0.0]);
+			input.insert(w_ih, w_ih_data);
+			input.insert(w_oh, w_oh_data);
+			let output, grad_wrt_woh = g.get_output_with_gradient(out, w_ho, &input);
+			// TODO: Start here.
+		}
+	}
 }
