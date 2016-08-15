@@ -5,3 +5,4 @@ authors = ["Joseph Catrambone <jo.jcat@gmail.com>"]
 
 [dependencies]
 ocl = "0.10"
+rand = "0.3"

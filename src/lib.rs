@@ -8,9 +8,11 @@ use std::f32;
 use std::vec;
 use std::collections::HashMap;
 use std::collections::hash_set::HashSet;
+use rand::Rng;
 
 extern crate ocl;
 use ocl::{ProQue, Buffer};
+extern crate rand;
 
 static KERNEL_SOURCE: &'static str = include_str!("kernel_source.cl");
 
@@ -378,8 +380,10 @@ impl Graph {
 
 #[cfg(test)]
 mod tests {
+	extern crate rand;
 	use super::{Graph, Dimension, Node, NodeId};
 	use std::collections::HashMap;
+	use rand::Rng;
 
 	#[test]
 	fn test_identity() {
@@ -553,30 +557,43 @@ mod tests {
 
 	#[test]
 	fn test_backprop() {
+		// Dataset generator.
+		let mut rng = rand::thread_rng();
+
 		// Define graph
-		let g = Graph::new();
+		let mut g = Graph::new();
 
 		// Define inputs and variables.
 		let x = g.input((1, 2));
+		let y = g.input((1, 1)); // Our truth for training.
 		let w_ih = g.input((2, 5));
 		let w_ho = g.input((5, 1));
 
-		let mut w_ih_data : Vec<f32> = (0..(2*5)).map(|i| i as f32 / 1000.0).collect();
-		let mut w_ho_data : Vec<f32> = (0..(2*5)).map(|i| i as f32 / 100.0).collect();
+		let mut w_ih_data : Vec<f32> = (0u32..(2*5)).map(|i| i as f32 / 1000.0).collect();
+		let mut w_ho_data : Vec<f32> = (0u32..(5*1)).map(|i| i as f32 / 100.0).collect();
 
 		// Define operations.
 		let hidden_z = g.matmul(x, w_ih);
 		let hidden_a = g.sigmoid(hidden_z);
 		let out = g.matmul(hidden_a, w_ho);
 
+		// Define squared error.
+		let inverse_result = g.constant_multiply(y, -1.0);
+		let error_product = g.add(inverse_result, out);
+		let cost = g.power(error_product, 2.0);
+
 		let mut inputs = HashMap::new();
-		for _ in 0..10000 {
+		for _ in 0..1 {
 			// Train an example.
-			input.insert(x, vec![0.0, 0.0]);
-			input.insert(w_ih, w_ih_data);
-			input.insert(w_oh, w_oh_data);
-			let output, grad_wrt_woh = g.get_output_with_gradient(out, w_ho, &input);
-			// TODO: Start here.
+			let x0 : bool = rng.gen();
+			let x1 : bool = rng.gen();
+			inputs.insert(x, vec![if x0 { 1.0 } else { 0.0 }, if x1 { 1.0 } else { 0.0 }]);
+			inputs.insert(y, vec![if (x0 ^ x1) { 1.0 } else { 0.0 }]);
+			inputs.insert(w_ih, w_ih_data.clone());
+			inputs.insert(w_ho, w_ho_data.clone());
+			let (output, grad_wrt_woh) = g.get_output_with_gradient(cost, w_ho, &inputs);
+			// TODO: If we set both input infinitesimals to 1, can we do multiple gradients in one pass?
+			println!("Error: {:?}.  Delta weights: {:?}", output, grad_wrt_woh);
 		}
 	}
 }
