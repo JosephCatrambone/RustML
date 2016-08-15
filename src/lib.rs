@@ -51,6 +51,11 @@ impl Graph {
 		}
 	}
 
+	// Utilty method
+	fn apply_gradient(&mut self, weight_matrix : &mut Vec<f32>) {
+		// Activation of the input layer
+	}
+
 	// Graph methods
 	fn get_output(&self, node_id : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> Vec<f32> {
 		match self.nodes[node_id].operation {
@@ -65,7 +70,8 @@ impl Graph {
 				let c_height = a_height;
 				assert_eq!(a_width, b_height);
 
-				let mut result = vec![0.0; a_height*b_width];
+				//let mut result = vec![0.0; a_height*b_width];
+				let mut result = vec![0.0; self.nodes[node_id].shape.0*self.nodes[node_id].shape.1];
 
 				// Set up the buffer for this node.
 				let a : Vec<f32> = self.get_output(n1, &input_map);
@@ -103,6 +109,7 @@ impl Graph {
 			Operation::ElementAdd(node_a_id, node_b_id) => { 
 				let a : Vec<f32> = self.get_output(node_a_id, &input_map);
 				let b : Vec<f32> = self.get_output(node_b_id, &input_map);
+				assert_eq!(a.len(), b.len());
 				let mut result = vec![0.0; a.len()];
 				for i in 0..a.len() {
 					result[i] = a[i]+b[i];
@@ -112,6 +119,7 @@ impl Graph {
 			Operation::ElementMultiply(node_a_id, node_b_id) => {
 				let a : Vec<f32> = self.get_output(node_a_id, &input_map);
 				let b : Vec<f32> = self.get_output(node_b_id, &input_map);
+				assert_eq!(a.len(), b.len());
 				let mut result = vec![0.0; a.len()];
 				for i in 0..a.len() {
 					result[i] = a[i]*b[i];
@@ -137,6 +145,7 @@ impl Graph {
 			Operation::Binary(node_a_id, node_b_id, ref f, _, _) => { // LHS, RHS, F, dF/dLHS, dF/dRHS
 				let a : Vec<f32> = self.get_output(node_a_id, &input_map);
 				let b : Vec<f32> = self.get_output(node_b_id, &input_map);
+				assert_eq!(a.len(), b.len());
 				let mut result = vec![0.0; a.len()];
 				for i in 0..a.len() {
 					result[i] = f(a[i], b[i]);
@@ -178,8 +187,8 @@ impl Graph {
 
 				// d(XY) = (dX)Y + X(dY)
 
-				let mut result = vec![0.0; a_real.len()];
-				let mut residual = vec![0.0; a_real.len()];
+				let mut result = vec![0.0; self.nodes[node_id].shape.0*self.nodes[node_id].shape.1];
+				let mut residual = vec![0.0; result.len()];
 
 				// Multiply n1 * n2 and dn1*n2 + n1*dn2 at the same time.
 				for i in 0..a_height { // Column [Iterating over row]
@@ -280,8 +289,10 @@ impl Graph {
 				// g( <a_real, a_res>, <b_real, b_res> ) = < g(a_real, b_real), dgda(a_real, b_real)*da + dgdb(a_real, b_real)*db>
 				let (a_real, a_res) = self.get_output_with_gradient(node_a_id, wrt, &input_map);
 				let (b_real, b_res) = self.get_output_with_gradient(node_b_id, wrt, &input_map);
+				assert_eq!(a_real.len(), b_real.len());
+				assert_eq!(a_res.len(), b_res.len());
 				let mut result_real = vec![0.0; a_real.len()];
-				let mut result_residual = vec![0.0; a_real.len()];
+				let mut result_residual = vec![0.0; a_res.len()];
 				for i in 0..a_real.len() {
 					result_real[i] = f(a_real[i], b_real[i]);
 					result_residual[i] = dfda(a_real[i], b_real[i])*a_res[i] + dfdb(a_real[i], b_real[i])*b_res[i];
@@ -564,6 +575,7 @@ mod tests {
 		let mut g = Graph::new();
 
 		// Define inputs and variables.
+		let learning_rate = 0.001f32;
 		let x = g.input((1, 2));
 		let y = g.input((1, 1)); // Our truth for training.
 		let w_ih = g.input((2, 5));
@@ -583,7 +595,7 @@ mod tests {
 		let cost = g.power(error_product, 2.0);
 
 		let mut inputs = HashMap::new();
-		for _ in 0..1 {
+		for _ in 0..10000 {
 			// Train an example.
 			let x0 : bool = rng.gen();
 			let x1 : bool = rng.gen();
@@ -593,6 +605,9 @@ mod tests {
 			inputs.insert(w_ho, w_ho_data.clone());
 			let (output, grad_wrt_woh) = g.get_output_with_gradient(cost, w_ho, &inputs);
 			// TODO: If we set both input infinitesimals to 1, can we do multiple gradients in one pass?
+			for i in 0..w_ho_data.len() {
+				w_ho_data[i] -= learning_rate * grad_wrt_woh[i] * output[i];
+			}
 			println!("Error: {:?}.  Delta weights: {:?}", output, grad_wrt_woh);
 		}
 	}
