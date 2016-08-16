@@ -16,7 +16,7 @@ extern crate rand;
 
 static KERNEL_SOURCE: &'static str = include_str!("kernel_source.cl");
 
-type Dimension = (usize, usize);
+type Dimension = (usize, usize); // Row/Col.  Height/Width.
 type NodeId = usize;
 
 enum Operation {
@@ -38,6 +38,21 @@ struct Node {
 	operation : Operation,
 }
 
+fn apply_gradient(weight_matrix : &mut Vec<f32>, input : &Vec<f32>, gradient : &Vec<f32>, error : &Vec<f32>, learning_rate : f32) {
+	// Activation of the input layer
+	let width = error.len(); // Num columns.
+	let height = gradient.len()/width;
+	for y in 0..height {
+		for x in 0..width {
+			weight_matrix[x + y*width] += learning_rate * gradient[x + y*width] * error[x] * input[y]; // TODO: Multiply by activation at the layer below.;
+		}
+	}
+}
+
+fn get_element_from_tensor(matrix : Vec<f32>, shape : Dimension, x : usize, y : usize) -> f32 { // x = column = j.  y = row = i
+		matrix[x + y*shape.1]
+}
+
 struct Graph {
 //	proque : ProQue,
 	nodes : Vec<Node>,
@@ -51,12 +66,11 @@ impl Graph {
 		}
 	}
 
-	// Utilty method
-	fn apply_gradient(&mut self, weight_matrix : &mut Vec<f32>) {
-		// Activation of the input layer
+	// Graph methods
+	fn get_shape(&self, node_id : NodeId) -> Dimension {
+		self.nodes[node_id].shape.clone()
 	}
 
-	// Graph methods
 	fn get_output(&self, node_id : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> Vec<f32> {
 		match self.nodes[node_id].operation {
 			Operation::Input => { input_map.get(&node_id).unwrap().clone() },
@@ -155,7 +169,7 @@ impl Graph {
 		}
 	}
 
-	fn get_output_with_gradient(&self, node_id : NodeId, wrt : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> (Vec<f32>, Vec<f32>) {
+	fn get_output_with_gradient(&self, node_id : NodeId, wrt : &[NodeId], input_map : &HashMap<NodeId, Vec<f32>>) -> (Vec<f32>, Vec<f32>) {
 		// If we use infintesimals when calculating forward gradient, we get these:
 		// (x + x'eps) + (y + y'eps) = (x+y, (x'+y')eps)
 		// (x + x'eps) * (y + y'eps) = xy + xy'eps + x'yeps + x'y'eps^2 = xy + (xy' + x'y)eps
@@ -166,7 +180,11 @@ impl Graph {
 		match self.nodes[node_id].operation {
 			Operation::Input => {
 				let len = self.nodes[node_id].shape.0 * self.nodes[node_id].shape.1;
-				if node_id == wrt {
+				// Yes, in theory it's slower to iterate over an array than it is to use a hashmap, but because we know WRT is going to be small, it performs BETTER.
+				let mut contains : bool = false; 
+				for i in 0..wrt.len() { if wrt[i] == node_id { contains = true; } }
+
+				if contains {
 					(input_map.get(&node_id).unwrap().clone(), vec![1.0; len])
 				} else {
 					(input_map.get(&node_id).unwrap().clone(), vec![0.0; len])
@@ -182,8 +200,8 @@ impl Graph {
 				let c_height = a_height;
 				assert_eq!(a_width, b_height);
 
-				let (a_real, a_residual) = self.get_output_with_gradient(n1, wrt, &input_map);
-				let (b_real, b_residual) = self.get_output_with_gradient(n2, wrt, &input_map);
+				let (a_real, a_residual) = self.get_output_with_gradient(n1, &wrt, &input_map);
+				let (b_real, b_residual) = self.get_output_with_gradient(n2, &wrt, &input_map);
 
 				// d(XY) = (dX)Y + X(dY)
 
@@ -210,7 +228,7 @@ impl Graph {
 				(result, residual)
 			},
 			Operation::ConstantAdd(node, scalar) => {
-				let (mut real, mut residual) = self.get_output_with_gradient(node, wrt, &input_map);
+				let (mut real, mut residual) = self.get_output_with_gradient(node, &wrt, &input_map);
 
 				let vec_len = self.nodes[node_id].shape.0*self.nodes[node_id].shape.1;
 				
@@ -228,7 +246,7 @@ impl Graph {
 				// (xy) + (xy' + x'y)eps
 				// Since y is a constant scalar, yeps = 0 and y' is zero.
 				// (x + x_res) * (y + 0) -> (xy + x_res*y)
-				let (mut real, mut residual) = self.get_output_with_gradient(node, wrt, &input_map);
+				let (mut real, mut residual) = self.get_output_with_gradient(node, &wrt, &input_map);
 				for i in 0..real.len() {
 					real[i] *= scalar;
 					residual[i] *= scalar;
@@ -237,8 +255,8 @@ impl Graph {
 			},
 			Operation::ElementAdd(node_a_id, node_b_id) => { 
 				// (x + x'eps) + (y + y'eps) = (x+y, (x'+y')eps)
-				let (a_real, a_residual) = self.get_output_with_gradient(node_a_id, wrt, &input_map);
-				let (b_real, b_residual) = self.get_output_with_gradient(node_b_id, wrt, &input_map);
+				let (a_real, a_residual) = self.get_output_with_gradient(node_a_id, &wrt, &input_map);
+				let (b_real, b_residual) = self.get_output_with_gradient(node_b_id, &wrt, &input_map);
 				let mut real = vec![0.0; a_real.len()];
 				let mut residual = vec![0.0; a_real.len()];
 				for i in 0..a_real.len() {
@@ -249,8 +267,8 @@ impl Graph {
 			},
 			Operation::ElementMultiply(node_a_id, node_b_id) => {
 				// (x + x'eps) * (y + y'eps) = xy + xy'eps + x'yeps + x'y'eps^2 = xy + (xy' + x'y)eps
-				let (a_real, a_residual) = self.get_output_with_gradient(node_a_id, wrt, &input_map);
-				let (b_real, b_residual) = self.get_output_with_gradient(node_b_id, wrt, &input_map);
+				let (a_real, a_residual) = self.get_output_with_gradient(node_a_id, &wrt, &input_map);
+				let (b_real, b_residual) = self.get_output_with_gradient(node_b_id, &wrt, &input_map);
 				let mut real = vec![0.0; a_real.len()];
 				let mut residual = vec![0.0; a_real.len()];
 				for i in 0..a_real.len() {
@@ -266,7 +284,7 @@ impl Graph {
 				// v = a_real
 				// v' = a_res
 				// u'v - uv' -> -1.0*a_res / a_real*a_real
-				let (a_real, a_res) = self.get_output_with_gradient(node, wrt, &input_map);
+				let (a_real, a_res) = self.get_output_with_gradient(node, &wrt, &input_map);
 				let mut result = vec![0.0; a_real.len()];
 				let mut residual = vec![0.0; a_real.len()];
 				for i in 0..a_real.len() {
@@ -276,7 +294,7 @@ impl Graph {
 				(result, residual)
 			},
 			Operation::Unary(node_id, ref f, ref dfdx) => {
-				let (a_real, a_res) = self.get_output_with_gradient(node_id, wrt, &input_map);
+				let (a_real, a_res) = self.get_output_with_gradient(node_id, &wrt, &input_map);
 				let mut result = vec![0.0; a_real.len()];
 				let mut residual = vec![0.0; a_real.len()];
 				for i in 0..a_real.len() {
@@ -287,8 +305,8 @@ impl Graph {
 			},
 			Operation::Binary(node_a_id, node_b_id, ref f, ref dfda, ref dfdb) => { // LHS, RHS, F, dF/dLHS, dF/dRHS
 				// g( <a_real, a_res>, <b_real, b_res> ) = < g(a_real, b_real), dgda(a_real, b_real)*da + dgdb(a_real, b_real)*db>
-				let (a_real, a_res) = self.get_output_with_gradient(node_a_id, wrt, &input_map);
-				let (b_real, b_res) = self.get_output_with_gradient(node_b_id, wrt, &input_map);
+				let (a_real, a_res) = self.get_output_with_gradient(node_a_id, &wrt, &input_map);
+				let (b_real, b_res) = self.get_output_with_gradient(node_b_id, &wrt, &input_map);
 				assert_eq!(a_real.len(), b_real.len());
 				assert_eq!(a_res.len(), b_res.len());
 				let mut result_real = vec![0.0; a_real.len()];
@@ -392,7 +410,7 @@ impl Graph {
 #[cfg(test)]
 mod tests {
 	extern crate rand;
-	use super::{Graph, Dimension, Node, NodeId};
+	use super::{Graph, Dimension, Node, NodeId, apply_gradient};
 	use std::collections::HashMap;
 	use rand::Rng;
 
@@ -451,9 +469,9 @@ mod tests {
 		input.insert(a, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 
 		let res = g.get_output(b, &input);
-		let (a_val, db_val_wrt_a) = g.get_output_with_gradient(b, a, &input);
-		let (a_val_2, db_val_wrt_b) = g.get_output_with_gradient(b, b, &input);
-		let (a_val_3, dc_val_wrt_a) = g.get_output_with_gradient(c, a, &input);
+		let (a_val, db_val_wrt_a) = g.get_output_with_gradient(b, &[a], &input);
+		let (a_val_2, db_val_wrt_b) = g.get_output_with_gradient(b, &[b], &input);
+		let (a_val_3, dc_val_wrt_a) = g.get_output_with_gradient(c, &[a], &input);
 		assert_eq!(a_val[0], 11.0);
 		assert_eq!(a_val_2[0], 11.0);
 		assert_eq!(db_val_wrt_a[0], 1.0); // d/dx x+10 = 1
@@ -503,7 +521,7 @@ mod tests {
 		let expected_result = vec![-974.9000000000001, 7.0, 19.249000000000002, -999988.999996, 0.8510000000000009, 17.0, 1094.9, 617.875, 855.8888888888889, 15.0];
 		let expected_grad = vec![298.01, 5.0, 102.52999999999999, 1000000000004.0, 103.52999999999999, 9.0, 308.01, 203.015625, 255.01234567901236, 8.0];
 
-		let (fx, dfdx) = g.get_output_with_gradient(abcdef, x, &input);
+		let (fx, dfdx) = g.get_output_with_gradient(abcdef, &[x], &input);
 		for i in 0..10 {
 			assert!((fx[i] - expected_result[i]).abs() <= EPSILON);
 			assert!((dfdx[i] - expected_grad[i]).abs() <= EPSILON);
@@ -529,7 +547,7 @@ mod tests {
 
 			input.insert(x, vec![x0, x1, x2]);
 
-			let (out, outgrad) = g.get_output_with_gradient(op, x, &input);
+			let (out, outgrad) = g.get_output_with_gradient(op, &[x], &input);
 			let numerical_grad = (out[2] - out[0]) / (x2 - x0);
 
 			//println!("{:?} : {:?} {:?}", &[x0, x1, x2], &out, &outgrad);
@@ -551,8 +569,8 @@ mod tests {
 		
 		input.insert(x, x_data.clone());
 		input.insert(y, y_data.clone());
-		let d_wrt_x = g.get_output_with_gradient(mm, x, &input);
-		let d_wrt_y = g.get_output_with_gradient(mm, y, &input);
+		let d_wrt_x = g.get_output_with_gradient(mm, &[x], &input);
+		let d_wrt_y = g.get_output_with_gradient(mm, &[y], &input);
 
 		/*
 		println!("X:{:?}", x_data);
@@ -567,7 +585,33 @@ mod tests {
 	}
 
 	#[test]
+	fn test_linear_regression() {
+		const MULTIPLE : f32 = 3.0;
+		let mut w_data = vec![1.0];
+
+		let mut g = Graph::new();
+		let x = g.input((1, 1));
+		let w = g.input((1, 1));
+		let y = g.matmul(x,w);
+
+		let mut inputs = HashMap::new();
+		for i in 0..200u32 {
+			inputs.insert(x, vec![i as f32]);	
+			inputs.insert(w, w_data.clone());
+			let (res, grad) = g.get_output_with_gradient(y, &[w], &inputs);
+			let err = vec![MULTIPLE*(i as f32) - res[0]];
+			println!("{} * {} = {} --- Error: {} --- Grad: {}", i, w_data[0], res[0], err[0], grad[0]);
+			w_data[0] += 0.001 * err[0] * grad[0] * (i as f32);
+		}
+		assert_eq!(MULTIPLE, w_data[0]);
+	}
+
+	#[test]
 	fn test_backprop() {
+		const INPUT_SIZE : usize = 2;
+		const HIDDEN_SIZE : usize = 5;
+		const OUTPUT_SIZE : usize = 3;
+
 		// Dataset generator.
 		let mut rng = rand::thread_rng();
 
@@ -575,40 +619,65 @@ mod tests {
 		let mut g = Graph::new();
 
 		// Define inputs and variables.
-		let learning_rate = 0.001f32;
-		let x = g.input((1, 2));
-		let y = g.input((1, 1)); // Our truth for training.
-		let w_ih = g.input((2, 5));
-		let w_ho = g.input((5, 1));
+		let learning_rate = 0.01f32;
+		let x = g.input((1, INPUT_SIZE));
+		let w_ih = g.input((INPUT_SIZE, HIDDEN_SIZE));
+		let w_ho = g.input((HIDDEN_SIZE, OUTPUT_SIZE));
 
-		let mut w_ih_data : Vec<f32> = (0u32..(2*5)).map(|i| i as f32 / 1000.0).collect();
-		let mut w_ho_data : Vec<f32> = (0u32..(5*1)).map(|i| i as f32 / 100.0).collect();
+		let mut w_ih_data : Vec<f32> = (0u32..(INPUT_SIZE*HIDDEN_SIZE) as u32).map(|i| rng.gen::<f32>()*0.1).collect();
+		let mut w_ho_data : Vec<f32> = (0u32..(HIDDEN_SIZE*OUTPUT_SIZE) as u32).map(|i| rng.gen::<f32>()*0.1).collect();
 
 		// Define operations.
 		let hidden_z = g.matmul(x, w_ih);
 		let hidden_a = g.sigmoid(hidden_z);
 		let out = g.matmul(hidden_a, w_ho);
 
-		// Define squared error.
-		let inverse_result = g.constant_multiply(y, -1.0);
-		let error_product = g.add(inverse_result, out);
-		let cost = g.power(error_product, 2.0);
-
 		let mut inputs = HashMap::new();
-		for _ in 0..10000 {
+		for _ in 0..100 {
 			// Train an example.
 			let x0 : bool = rng.gen();
 			let x1 : bool = rng.gen();
-			inputs.insert(x, vec![if x0 { 1.0 } else { 0.0 }, if x1 { 1.0 } else { 0.0 }]);
-			inputs.insert(y, vec![if (x0 ^ x1) { 1.0 } else { 0.0 }]);
+			let example = vec![if x0 { 1.0 } else { 0.0 }, if x1 { 1.0 } else { 0.0 }];
+			inputs.insert(x, example.clone());
 			inputs.insert(w_ih, w_ih_data.clone());
 			inputs.insert(w_ho, w_ho_data.clone());
-			let (output, grad_wrt_woh) = g.get_output_with_gradient(cost, w_ho, &inputs);
+			let (output, grad) = g.get_output_with_gradient(out, &[w_ho, w_ih], &inputs);
+			let err = vec![
+				if x0 ^ x1 { output[0] - 1.0 } else { output[0] }, 
+				if x0 || x1 { output[1] - 1.0 } else { output[1] }, 
+				if x0 && x1 { output[2] - 1.0 } else { output[2] }, 
+			];
+			assert!(!output[0].is_nan());
 			// TODO: If we set both input infinitesimals to 1, can we do multiple gradients in one pass?
-			for i in 0..w_ho_data.len() {
-				w_ho_data[i] -= learning_rate * grad_wrt_woh[i] * output[i];
-			}
-			println!("Error: {:?}.  Delta weights: {:?}", output, grad_wrt_woh);
+			apply_gradient(&mut w_ih_data, &example, &grad, &err, learning_rate);
+			apply_gradient(&mut w_ho_data, &example, &grad, &err, learning_rate);
+			println!("Net out: {:?} Expected: {} {} {}  Error: {:?}.  Delta weights: {:?}", output, x0^x1, x0 || x1, x0 && x1, err, grad);
 		}
+		// delta_w_ij = alpha * (tj - yj) * g'(h_j) * x_i
+		// dw = learning_rate * (truth - out) * derivative_of_activation(input_activation) * input_activation
+
+		// Verify network.
+		inputs.insert(w_ih, w_ih_data.clone());
+		inputs.insert(w_ho, w_ho_data.clone());
+
+		inputs.insert(x, vec![0f32, 0.0]);
+		let res = g.get_output(out, &inputs);
+		println!("{} ^ {} : {}", 0, 0, res[0]);
+		assert!(res[0] < 0.1);
+
+		inputs.insert(x, vec![0f32, 1.0]);
+		let res = g.get_output(out, &inputs);
+		println!("{} ^ {} : {}", 0, 1, res[0]);
+		assert!(res[0] > 0.9);
+
+		inputs.insert(x, vec![1.00f32, 0.0]);
+		let res = g.get_output(out, &inputs);
+		println!("{} ^ {} : {}", 1, 0, res[0]);
+		assert!(res[0] > 0.9);
+
+		inputs.insert(x, vec![1.0f32, 1.0]);
+		let res = g.get_output(out, &inputs);
+		println!("{} ^ {} : {}", 1, 1, res[0]);
+		assert!(res[0] < 0.1);
 	}
 }
