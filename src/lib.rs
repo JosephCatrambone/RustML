@@ -36,6 +36,7 @@ fn apply_gradient(weight_matrix : &mut Vec<f32>, activation : &Vec<f32>, gradien
 	// Activation of the input layer
 	let width = error.len(); // Num columns.
 	let height = gradient.len()/width;
+	// Delta E / delta w_ji = learning rate * (true_j - output_j) * g'(h_j) * x_i
 	for y in 0..height {
 		for x in 0..width {
 			weight_matrix[x + y*width] += learning_rate * gradient[x + y*width] * error[x] * activation[y]; // TODO: Multiply by activation at the layer below.;
@@ -540,7 +541,7 @@ mod tests {
 	fn test_backprop() {
 		const INPUT_SIZE : usize = 2;
 		const HIDDEN_SIZE : usize = 5;
-		const OUTPUT_SIZE : usize = 3;
+		const OUTPUT_SIZE : usize = 1;
 
 		// Dataset generator.
 		let mut rng = rand::thread_rng();
@@ -549,10 +550,11 @@ mod tests {
 		let mut g = Graph::new();
 
 		// Define inputs and variables.
-		let learning_rate = 0.01f32;
+		let learning_rate = 0.001f32;
 		let x = g.input((1, INPUT_SIZE));
 		let w_ih = g.input((INPUT_SIZE, HIDDEN_SIZE));
 		let w_ho = g.input((HIDDEN_SIZE, OUTPUT_SIZE));
+		let y = g.input((1, OUTPUT_SIZE)); // For labels.
 
 		let mut w_ih_data : Vec<f32> = (0u32..(INPUT_SIZE*HIDDEN_SIZE) as u32).map(|i| rng.gen::<f32>()*0.1).collect();
 		let mut w_ho_data : Vec<f32> = (0u32..(HIDDEN_SIZE*OUTPUT_SIZE) as u32).map(|i| rng.gen::<f32>()*0.1).collect();
@@ -562,28 +564,37 @@ mod tests {
 		let hidden_a = g.sigmoid(hidden_z);
 		let out = g.matmul(hidden_a, w_ho);
 
+		// Define our errors.
+		let out_inverse = g.constant_multiply(out, -1.0);
+		let error_function = g.add(y, out_inverse);
+		let cost = g.power(error_function, 2.0); // Squared error.
+
 		let mut inputs = HashMap::new();
 		let mut activations = HashMap::new();
 		let mut gradients = HashMap::new();
-		for _ in 0..1000 {
+		for _ in 0..10000 {
 			// Train an example.
 			let x0 : bool = rng.gen();
 			let x1 : bool = rng.gen();
 			let example = vec![if x0 { 1.0 } else { 0.0 }, if x1 { 1.0 } else { 0.0 }];
+			let label = vec![if x0 ^ x1 { 1.0 } else { 0.0 }];
 			inputs.insert(x, example.clone());
 			inputs.insert(w_ih, w_ih_data.clone());
 			inputs.insert(w_ho, w_ho_data.clone());
+			inputs.insert(y, label.clone());
 			
-			g.get_output_with_gradients(out, &[x], &inputs, &mut activations, &mut gradients);
-			let output = activations.get(&out).unwrap();
-			let err = vec![
-				if x0 ^ x1 { 1.0 - output[0] } else { 0.0 - output[0] }, 
-				if x0 || x1 { 1.0 - output[1] - 1.0 } else { 0.0 - output[1] }, 
-				if x0 && x1 { 1.0 - output[2] - 1.0 } else { 0.0 - output[2] }, 
-			];
-			assert!(!output[0].is_nan());
+			//let output : Vec<f32> = activations.get(&cost).unwrap();
+			//assert!(!output[0].is_nan());
 			// fn apply_gradient(weight_matrix : &mut Vec<f32>, input : &Vec<f32>, gradient : &Vec<f32>, error : &Vec<f32>, learning_rate : f32)
-			apply_gradient(&mut w_ih_data, activations.get(&x).unwrap(), gradients.get(&w_ih).unwrap(), &err, learning_rate);
+			g.get_output_with_gradients(cost, &[w_ho, w_ih], &inputs, &mut activations, &mut gradients);
+			let delta_w_ih = gradients.get(&w_ih).unwrap();
+			for i in 0..w_ih_data.len() {
+				w_ih_data[i] -= delta_w_ih[i];
+			}
+			let delta_w_ho = gradients.get(&w_ho).unwrap();
+			for i in 0..w_ho_data.len() {
+				w_ho_data[i] -= delta_w_ho[i];
+			}
 			//apply_gradient(&mut w_ho_data, activations.get(&hidden_a).unwrap(), gradients.get(&w_ho).unwrap(), &err, learning_rate);
 		}
 		// delta_w_ij = alpha * (tj - yj) * g'(h_j) * x_i
@@ -596,21 +607,22 @@ mod tests {
 		inputs.insert(x, vec![0f32, 0.0]);
 		let res = g.get_output(out, &inputs);
 		println!("{} ^ {} : {}", 0, 0, res[0]);
-		assert!(res[0] < 0.1);
+		//assert!(res[0] < 0.1);
 
 		inputs.insert(x, vec![0f32, 1.0]);
 		let res = g.get_output(out, &inputs);
 		println!("{} ^ {} : {}", 0, 1, res[0]);
-		assert!(res[0] > 0.9);
+		//assert!(res[0] > 0.9);
 
 		inputs.insert(x, vec![1.00f32, 0.0]);
 		let res = g.get_output(out, &inputs);
 		println!("{} ^ {} : {}", 1, 0, res[0]);
-		assert!(res[0] > 0.9);
+		//assert!(res[0] > 0.9);
 
 		inputs.insert(x, vec![1.0f32, 1.0]);
 		let res = g.get_output(out, &inputs);
 		println!("{} ^ {} : {}", 1, 1, res[0]);
-		assert!(res[0] < 0.1);
+		//assert!(res[0] < 0.1);
+		assert!(false);
 	}
 }
