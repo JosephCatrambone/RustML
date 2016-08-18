@@ -39,7 +39,9 @@ fn apply_gradient(weight_matrix : &mut Vec<f32>, activation : &Vec<f32>, gradien
 	// Delta E / delta w_ji = learning rate * (true_j - output_j) * g'(h_j) * x_i
 	for y in 0..height {
 		for x in 0..width {
+			println!("DEBUG: wm[{}] += {} * {} * {} * {}", x+y*width, learning_rate, gradient[x+y*width] , error[x] , activation[y]);
 			weight_matrix[x + y*width] += learning_rate * gradient[x + y*width] * error[x] * activation[y]; // TODO: Multiply by activation at the layer below.;
+			println!("DEBUG: wm[{}] = {}", x+y*width, weight_matrix[x+y*width]);
 		}
 	}
 }
@@ -128,9 +130,11 @@ impl Graph {
 		// ELSE it's 0.
 		// In general, g(<u,u'>, <v, v'>) = <g(u,v) , dg/du(u,v)*u' + dg/dv(u,v)*v'>
 
-		if activations.contains_key(&node_id) && gradients.contains_key(&node_id) {
-			return; // Don't recalculate.
-		}
+		//if activations.contains_key(&node_id) && gradients.contains_key(&node_id) {
+		//	return; // Don't recalculate.
+		//}
+
+		//println!("DEBUG: get_output_with_derivatives({:?}, {:?}, {:?}, {:?}, {:?})", node_id, wrt, input_map, activations, gradients);
 
 		match self.nodes[node_id].operation {
 			Operation::Input => {
@@ -456,20 +460,23 @@ mod tests {
 
 	#[test]
 	fn numerical_gradient_check() {
-		const DELTA : f32 = 0.001;
+		const DELTA : f32 = 0.1;
 		const EPSILON : f32 = 0.01;
 		let mut g = Graph::new();
 		let x = g.input((1, 3));
 
 		// This can be whatever method.
-		//let op = g.constant_multiply(x, 50.0);
-		let op = g.sigmoid(x);
+		let a = g.constant_add(x, 5.0);
+		let b = g.constant_multiply(a, -1.5);
+		let c = g.add(a, b);
+		let d = g.sigmoid(c);
+		let op = g.power(d, 2.0);
 
 		let mut input = HashMap::new();
 		let mut activations = HashMap::new();
 		let mut gradients = HashMap::new();
-		for i in -100..100i32 {
-			let j = (i as f32)/50.0;
+		for i in -256..256i32 {
+			let j = (i as f32);
 			let x0 = j-DELTA;
 			let x1 = j;
 			let x2 = j+DELTA;
@@ -553,6 +560,46 @@ mod tests {
 	}
 
 	#[test]
+	fn test_deep_backprop() {
+		let mut rng = rand::thread_rng();
+		let mut g = Graph::new();
+
+		let a = g.input((1, 1));
+		let b = g.input((1, 1));
+		let c = g.input((1, 1));
+		let d = g.input((1, 1));
+
+		let x = g.matmul(a, b);
+		let y = g.matmul(x, c);
+		let z = g.sigmoid(y);
+		let w = g.matmul(z, d);
+
+		// w = sigmoid((a*b)*c)*d
+		// dw/dd = sigmoid((a*b)*c)
+		// dw/da = b*c*d*e^(a*b*c) / (e^(a*b*c)+1)^2
+		let mut activations = HashMap::new();
+		let mut derivatives = HashMap::new();
+		for i in 0..10000 {
+			let a_ = rng.gen::<f32>()*10.0;
+			let b_ = rng.gen::<f32>()*10.0;
+			let c_ = rng.gen::<f32>()*10.0;
+			let d_ = rng.gen::<f32>()*10.0;
+			let expected_dw_dd = 1.0/(1.0 + (-1.0*a_*b_*c_).exp());
+			let expected_dw_da = b_*c_*d_*(a_*b_*c_).exp() / (1.0+(a_*b_*c_).exp().powf(2.0));
+
+			let mut inputs = HashMap::new();
+			inputs.insert(a, vec![a_]);
+			inputs.insert(b, vec![b_]);
+			inputs.insert(c, vec![c_]);
+			inputs.insert(d, vec![d_]);
+
+			g.get_output_with_derivatives(w, &[d], &inputs, &mut activations, &mut derivatives);
+			println!("Derivatives of w wrt d: {:?}.  Expected: {:?}", derivatives.get(&w).unwrap(), expected_dw_dd);
+			assert!((derivatives.get(&w).unwrap()[0] - expected_dw_dd).abs() < 0.0001);
+		}
+	}
+
+	#[test]
 	fn test_backprop() {
 		const INPUT_SIZE : usize = 2;
 		const HIDDEN_SIZE : usize = 3;
@@ -589,7 +636,7 @@ mod tests {
 
 		let mut inputs = HashMap::new();
 		let mut activations = HashMap::new();
-		let mut gradients = HashMap::new();
+		let mut derivatives = HashMap::new();
 		for i in 0..10 {
 			// Train an example.
 			let x0 : bool = rng.gen();
@@ -606,23 +653,11 @@ mod tests {
 			//assert!(!output[0].is_nan());
 			// fn apply_gradient(weight_matrix : &mut Vec<f32>, input : &Vec<f32>, gradient : &Vec<f32>, error : &Vec<f32>, learning_rate : f32)
 			{
-				g.get_output_with_derivatives(error_function, &[w_ih], &inputs, &mut activations, &mut gradients);
-				let delta_w_ih = gradients.get(&w_ih).unwrap();
-				let delta_w_ho = gradients.get(&w_ho).unwrap();
-				let delta_h_bias = gradients.get(&h_bias).unwrap();
-				for i in 0..w_ih_data.len() {
-					w_ih_data[i] -= learning_rate * delta_w_ih[i];
-				}
-				for i in 0..w_ho_data.len() {
-					w_ho_data[i] -= learning_rate * delta_w_ho[i];
-				}
-				for i in 0..h_bias_data.len() {
-					h_bias_data[i] -= learning_rate * delta_h_bias[i];
-				}
-				println!("delta w ih: {:?} - delta w ho: {:?} - delta bias: {:?}", delta_w_ih, delta_w_ho, delta_h_bias);
+				g.get_output_with_derivatives(cost, &[w_ih, w_ho], &inputs, &mut activations, &mut derivatives); // d error wrt w_ih
+				apply_gradient(&mut w_ho_data, &example, &derivatives.get(&cost).unwrap(), &activations.get(&cost).unwrap(), 0.01);
 			}
 			activations.clear();
-			gradients.clear();
+			derivatives.clear();
 			//apply_gradient(&mut w_ho_data, activations.get(&hidden_a).unwrap(), gradients.get(&w_ho).unwrap(), &err, learning_rate);
 
 			if (i+1) % 1000 == 0 {
