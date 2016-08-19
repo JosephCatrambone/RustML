@@ -122,7 +122,9 @@ impl Graph {
 		}
 	}
 
-	fn get_output_with_derivatives(&self, node_id : NodeId, wrt : &[NodeId], input_map : &HashMap<NodeId, Vec<f32>>, mut activations : &mut HashMap<NodeId, Vec<f32>>, mut gradients : &mut HashMap<NodeId, Vec<f32>>) {
+	fn get_derivative(&self, node_id : NodeId, wrt : &[NodeId], input_map : &HashMap<NodeId, Vec<f32>>) -> (Vec<f32>, Vec<f32>) {
+		// TODO: Memoize this to speed it up.
+
 		// If we use infintesimals when calculating forward gradient, we get these:
 		// (x + x'eps) + (y + y'eps) = (x+y, (x'+y')eps)
 		// (x + x'eps) * (y + y'eps) = xy + xy'eps + x'yeps + x'y'eps^2 = xy + (xy' + x'y)eps
@@ -130,26 +132,24 @@ impl Graph {
 		// ELSE it's 0.
 		// In general, g(<u,u'>, <v, v'>) = <g(u,v) , dg/du(u,v)*u' + dg/dv(u,v)*v'>
 
-		//if activations.contains_key(&node_id) && gradients.contains_key(&node_id) {
-		//	return; // Don't recalculate.
-		//}
-
-		//println!("DEBUG: get_output_with_derivatives({:?}, {:?}, {:?}, {:?}, {:?})", node_id, wrt, input_map, activations, gradients);
+		//println!("DEBUG: get_derivative({:?}, {:?}, {:?}, {:?}, {:?})", node_id, wrt, input_map, activations, gradients);
+		let mut wrt_this : bool = false; 
+		for i in 0..wrt.len() { if wrt[i] == node_id { wrt_this = true; } }
 
 		match self.nodes[node_id].operation {
 			Operation::Input => {
 				let len = self.nodes[node_id].shape.0 * self.nodes[node_id].shape.1;
 
 				// Yes, in theory it's slower to iterate over an array than it is to use a hashmap, but because we know WRT is going to be small, it performs BETTER.
-				let mut contains : bool = false; 
-				for i in 0..wrt.len() { if wrt[i] == node_id { contains = true; } }
 
-				activations.insert(node_id, input_map.get(&node_id).unwrap().clone());
-				if contains {
-					gradients.insert(node_id, vec![1.0; len]);
-				} else {
-					gradients.insert(node_id, vec![0.0; len]);
-				}
+				(
+					input_map.get(&node_id).unwrap().clone(),
+					if wrt_this {
+						vec![1.0; len]
+					} else {
+						vec![0.0; len]
+					}
+				)
 			},
 			Operation::MatrixMultiply(n1, n2) => {
 				// Verify shapes
@@ -166,13 +166,8 @@ impl Graph {
 				let mut residual = vec![0.0; result.len()];
 
 				{
-					self.get_output_with_derivatives(n1, &wrt, &input_map, &mut activations, &mut gradients);
-					self.get_output_with_derivatives(n2, &wrt, &input_map, &mut activations, &mut gradients);
-
-					let a_real = activations.get(&n1).unwrap();
-					let a_residual = gradients.get(&n1).unwrap();
-					let b_real = activations.get(&n2).unwrap();
-					let b_residual = gradients.get(&n2).unwrap();
+					let (a_real, a_residual) = self.get_derivative(n1, &wrt, &input_map);
+					let (b_real, b_residual) = self.get_derivative(n2, &wrt, &input_map);
 
 					// Multiply n1 * n2 and dn1*n2 + n1*dn2 at the same time.
 					for i in 0..a_height { // Column [Iterating over row]
@@ -192,35 +187,37 @@ impl Graph {
 					}
 				}
 
-				activations.insert(node_id, result);
-				gradients.insert(node_id, residual);
+				// TODO: It should probably never happen, right?
+				if wrt_this {
+					(result, vec![1.0; residual.len()])
+				} else {
+					(result, residual)
+				}
 			},
 			Operation::Unary(a_id, ref f, ref dfdx) => {
 				let mut result = vec![0.0; self.nodes[node_id].shape.0*self.nodes[node_id].shape.1];
 				let mut residual = vec![0.0; result.len()];
 				{	
-					self.get_output_with_derivatives(a_id, &wrt, &input_map, &mut activations, &mut gradients);
-					let a_real = activations.get(&a_id).unwrap();
-					let a_res = gradients.get(&a_id).unwrap();
+					let (a_real, a_res) = self.get_derivative(a_id, &wrt, &input_map);
 					for i in 0..a_real.len() {
 						result[i] = f(a_real[i]);
 						residual[i] = dfdx(a_real[i])*a_res[i];
 					}
 				}
-				activations.insert(node_id, result);
-				gradients.insert(node_id, residual);
+
+				if wrt_this {
+					(result, vec![1.0; residual.len()])
+				} else {
+					(result, residual)
+				}
 			},
 			Operation::Binary(node_a_id, node_b_id, ref f, ref dfda, ref dfdb) => { // LHS, RHS, F, dF/dLHS, dF/dRHS
 				// g( <a_real, a_res>, <b_real, b_res> ) = < g(a_real, b_real), dgda(a_real, b_real)*da + dgdb(a_real, b_real)*db>
 				let mut result_real = vec![0.0; self.nodes[node_id].shape.0*self.nodes[node_id].shape.1];
 				let mut result_residual = vec![0.0; result_real.len()];
 				{
-					self.get_output_with_derivatives(node_a_id, &wrt, &input_map, &mut activations, &mut gradients);
-					self.get_output_with_derivatives(node_b_id, &wrt, &input_map, &mut activations, &mut gradients);
-					let a_real = activations.get(&node_a_id).unwrap();
-					let a_res = gradients.get(&node_a_id).unwrap();
-					let b_real = activations.get(&node_b_id).unwrap();
-					let b_res = gradients.get(&node_b_id).unwrap();
+					let (a_real, a_res) = self.get_derivative(node_a_id, &wrt, &input_map);
+					let (b_real, b_res) = self.get_derivative(node_b_id, &wrt, &input_map);
 					assert_eq!(a_real.len(), b_real.len());
 					assert_eq!(a_res.len(), b_res.len());
 					for i in 0..a_real.len() {
@@ -228,8 +225,12 @@ impl Graph {
 						result_residual[i] = dfda(a_real[i], b_real[i])*a_res[i] + dfdb(a_real[i], b_real[i])*b_res[i];
 					}
 				}
-				activations.insert(node_id, result_real);
-				gradients.insert(node_id, result_residual);
+
+				if wrt_this {
+					(result_real, vec![1.0; result_residual.len()])
+				} else {
+					(result_real, result_residual)
+				}
 			},
 		}
 	}
@@ -388,19 +389,28 @@ mod tests {
 		let b = g.constant_add(a, 10.0);
 		let c = g.constant_multiply(a, 2.0);
 		let d = g.add(b, c);
+		// b = a+10  c = a*2  d = (a+10)+(a*2)
 		
 		let mut input = HashMap::new();
-		let mut activations = HashMap::new();
-		let mut gradients = HashMap::new();
 		input.insert(a, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 
-		let res = g.get_output(d, &input);
-		g.get_output_with_derivatives(d, &[a], &input, &mut activations, &mut gradients);
-		for dbda in gradients.get(&b).unwrap() {
+		let (activations, gradients) = g.get_derivative(b, &[a], &input);
+		// db/da (a + 10) = 1.0
+		for dbda in gradients {
+			println!("dB/dA: {}.  Expected: 1.0", dbda);
 			assert!((dbda - 1.0).abs() < 0.001);
 		}
-		for dcda in gradients.get(&c).unwrap() {
+		// dc/da = 2.0
+		let (activations, gradients) = g.get_derivative(c, &[a], &input);
+		for dcda in gradients {
+			println!("dC/dA: {}.  Expected: 2.0", dcda);
 			assert!((dcda - 2.0).abs() < 0.001);
+		}
+		let (activations, gradients) = g.get_derivative(d, &[a], &input);
+		// dd/da = dd/da ( 2a + a + 10 ) = ( 3 )
+		for ddda in gradients {
+			println!("dD/dA: {}.  Expected: 3.0", ddda);
+			assert!((ddda - 3.0).abs() < 0.001);
 		}
 	}
 
@@ -446,12 +456,7 @@ mod tests {
 		let expected_result = vec![-974.9000000000001, 7.0, 19.249000000000002, -999988.999996, 0.8510000000000009, 17.0, 1094.9, 617.875, 855.8888888888889, 15.0];
 		let expected_grad = vec![298.01, 5.0, 102.52999999999999, 1000000000004.0, 103.52999999999999, 9.0, 308.01, 203.015625, 255.01234567901236, 8.0];
 
-		let mut activations = HashMap::new();
-		let mut gradients = HashMap::new();
-
-		g.get_output_with_derivatives(abcdef, &[x], &input, &mut activations, &mut gradients);
-		let fx = activations.get(&abcdef).unwrap();
-		let dfdx = gradients.get(&abcdef).unwrap();
+		let (fx, dfdx) = g.get_derivative(abcdef, &[x], &input);
 		for i in 0..10 {
 			assert!((fx[i] - expected_result[i]).abs() <= EPSILON);
 			assert!((dfdx[i] - expected_grad[i]).abs() <= EPSILON);
@@ -473,8 +478,6 @@ mod tests {
 		let op = g.power(d, 2.0);
 
 		let mut input = HashMap::new();
-		let mut activations = HashMap::new();
-		let mut gradients = HashMap::new();
 		for i in -256..256i32 {
 			let j = (i as f32);
 			let x0 = j-DELTA;
@@ -483,20 +486,13 @@ mod tests {
 
 			{
 				input.insert(x, vec![x0, x1, x2]);
-				g.get_output_with_derivatives(op, &[x], &input, &mut activations, &mut gradients);
-				let out = activations.get(&op).unwrap();
-				let outgrad = gradients.get(&op).unwrap();
+				let (out, outgrad) = g.get_derivative(op, &[x], &input);
 				let numerical_grad = (out[2] - out[0]) / (x2 - x0);
 
 				//println!("{:?} : {:?} {:?}", &[x0, x1, x2], &out, &outgrad);
 				println!("f({}) -- Calculated gradient : {}.  Numerical approximation : {}.", j, outgrad[1], numerical_grad);
 				assert!( (outgrad[1]-numerical_grad).abs() < EPSILON );
 			}
-
-			// Remove the solutions to force recalculation.
-			//activations.remove(&op);
-			activations.clear();
-			gradients.clear();
 		}
 	}
 
@@ -515,7 +511,7 @@ mod tests {
 		input.insert(y, y_data.clone());
 		let mut activations : HashMap<usize, Vec<f32>> = HashMap::new();
 		let mut gradients : HashMap<usize, Vec<f32>> = HashMap::new();
-		g.get_output_with_derivatives(mm, &[x], &input, &mut activations, &mut gradients);
+		let (out, dmm_dxg) = g.get_derivative(mm, &[x], &input);
 
 		/*
 		println!("X:{:?}", x_data);
@@ -540,21 +536,15 @@ mod tests {
 		let y = g.matmul(x,w);
 
 		let mut inputs = HashMap::new();
-		let mut activations = HashMap::new();
-		let mut gradients = HashMap::new();
 		for i in 0..200u32 {
 			{
 				inputs.insert(x, vec![i as f32]);	
 				inputs.insert(w, w_data.clone());
-				g.get_output_with_derivatives(y, &[w], &inputs, &mut activations, &mut gradients);
-				let res = activations.get(&y).unwrap();
-				let grad = gradients.get(&w).unwrap();
+				let (res, grad) = g.get_derivative(y, &[w], &inputs);
 				let err = vec![MULTIPLE*(i as f32) - res[0]];
 				println!("{} * {} = {} --- Error: {} --- Grad: {}", i, w_data[0], res[0], err[0], grad[0]);
-				w_data[0] += 0.01 * err[0] * grad[0] * (i as f32);
+				w_data[0] += 0.001 * err[0] * grad[0] * (i as f32);
 			}
-			activations.clear();
-			gradients.clear()
 		}
 		assert_eq!(MULTIPLE, w_data[0]);
 	}
@@ -577,8 +567,6 @@ mod tests {
 		// w = sigmoid((a*b)*c)*d
 		// dw/dd = sigmoid((a*b)*c)
 		// dw/da = b*c*d*e^(a*b*c) / (e^(a*b*c)+1)^2
-		let mut activations = HashMap::new();
-		let mut derivatives = HashMap::new();
 		for i in 0..10000 {
 			let a_ = rng.gen::<f32>()*10.0;
 			let b_ = rng.gen::<f32>()*10.0;
@@ -593,9 +581,9 @@ mod tests {
 			inputs.insert(c, vec![c_]);
 			inputs.insert(d, vec![d_]);
 
-			g.get_output_with_derivatives(w, &[d], &inputs, &mut activations, &mut derivatives);
-			println!("Derivatives of w wrt d: {:?}.  Expected: {:?}", derivatives.get(&w).unwrap(), expected_dw_dd);
-			assert!((derivatives.get(&w).unwrap()[0] - expected_dw_dd).abs() < 0.0001);
+			let (out, dw_dd) = g.get_derivative(w, &[d], &inputs);
+			println!("Derivatives of w wrt d: {:?}.  Expected: {:?}", dw_dd, expected_dw_dd);
+			assert!((dw_dd[0] - expected_dw_dd).abs() < 0.0001);
 		}
 	}
 
@@ -635,8 +623,6 @@ mod tests {
 		let cost = g.power(error_function, 2.0); // Squared error.
 
 		let mut inputs = HashMap::new();
-		let mut activations = HashMap::new();
-		let mut derivatives = HashMap::new();
 		for i in 0..10 {
 			// Train an example.
 			let x0 : bool = rng.gen();
@@ -653,11 +639,13 @@ mod tests {
 			//assert!(!output[0].is_nan());
 			// fn apply_gradient(weight_matrix : &mut Vec<f32>, input : &Vec<f32>, gradient : &Vec<f32>, error : &Vec<f32>, learning_rate : f32)
 			{
-				g.get_output_with_derivatives(cost, &[w_ih, w_ho], &inputs, &mut activations, &mut derivatives); // d error wrt w_ih
-				apply_gradient(&mut w_ho_data, &example, &derivatives.get(&cost).unwrap(), &activations.get(&cost).unwrap(), 0.01);
+				let res = g.get_output(out, &inputs);
+				println!("Output: {:?}.  Goal: {:?}", res, label);
+				let (res, dcost_dw) = g.get_derivative(cost, &[w_ho], &inputs); // d error wrt w_ih
+				println!("Squared error: {:?}.  dCost/dWho : {:?}", res, dcost_dw);
+				let (res, dcost_dw) = g.get_derivative(cost, &[w_ih], &inputs); 
+				println!("Squared error: {:?}.  dCost/dWih : {:?}", res, dcost_dw);
 			}
-			activations.clear();
-			derivatives.clear();
 			//apply_gradient(&mut w_ho_data, activations.get(&hidden_a).unwrap(), gradients.get(&w_ho).unwrap(), &err, learning_rate);
 
 			if (i+1) % 1000 == 0 {
