@@ -122,9 +122,16 @@ impl Graph {
 		}
 	}
 
-	fn get_derivative(&self, node_id : NodeId, wrt : &[NodeId], input_map : &HashMap<NodeId, Vec<f32>>) -> (Vec<f32>, Vec<f32>) {
-		// TODO: Memoize this to speed it up.
+	fn backprop(&self, output_node : NodeId, input_map : &HashMap<NodeId, Vec<f32>>, error : Vec<f32>) {
+	}
 
+	fn get_derivative(&self, node_id : NodeId, wrt : &[NodeId], input_map : &HashMap<NodeId, Vec<f32>>) -> (Vec<f32>, Vec<f32>) {
+		let mut cache_a = HashMap::new();
+		let mut cache_d = HashMap::new();
+		self.get_derivative_with_cache(node_id, &wrt, &input_map, &mut cache_a, &mut cache_d)
+	}
+
+	fn get_derivative_with_cache(&self, node_id : NodeId, wrt : &[NodeId], input_map : &HashMap<NodeId, Vec<f32>>, mut cached_activation : &mut HashMap<NodeId, Vec<f32>>, mut cached_derivative : &mut HashMap<NodeId, Vec<f32>>) -> (Vec<f32>, Vec<f32>) {
 		// If we use infintesimals when calculating forward gradient, we get these:
 		// (x + x'eps) + (y + y'eps) = (x+y, (x'+y')eps)
 		// (x + x'eps) * (y + y'eps) = xy + xy'eps + x'yeps + x'y'eps^2 = xy + (xy' + x'y)eps
@@ -132,15 +139,20 @@ impl Graph {
 		// ELSE it's 0.
 		// In general, g(<u,u'>, <v, v'>) = <g(u,v) , dg/du(u,v)*u' + dg/dv(u,v)*v'>
 
+		if cached_activation.contains_key(&node_id) && cached_derivative.contains_key(&node_id) {
+			return (cached_activation.get(&node_id).unwrap().clone(), cached_derivative.get(&node_id).unwrap().clone())
+		}
+
 		//println!("DEBUG: get_derivative({:?}, {:?}, {:?}, {:?}, {:?})", node_id, wrt, input_map, activations, gradients);
 		let mut wrt_this : bool = false; 
+		// Yes, in theory it's slower to iterate over an array than it is to use a hashmap, but because we know WRT is going to be small, it performs BETTER.
 		for i in 0..wrt.len() { if wrt[i] == node_id { wrt_this = true; } }
 
-		match self.nodes[node_id].operation {
+		let (act, eps) = match self.nodes[node_id].operation {
 			Operation::Input => {
 				let len = self.nodes[node_id].shape.0 * self.nodes[node_id].shape.1;
 
-				// Yes, in theory it's slower to iterate over an array than it is to use a hashmap, but because we know WRT is going to be small, it performs BETTER.
+				// Not caching this.
 
 				(
 					input_map.get(&node_id).unwrap().clone(),
@@ -166,8 +178,8 @@ impl Graph {
 				let mut residual = vec![0.0; result.len()];
 
 				{
-					let (a_real, a_residual) = self.get_derivative(n1, &wrt, &input_map);
-					let (b_real, b_residual) = self.get_derivative(n2, &wrt, &input_map);
+					let (a_real, a_residual) = self.get_derivative_with_cache(n1, &wrt, &input_map, &mut cached_activation, &mut cached_derivative);
+					let (b_real, b_residual) = self.get_derivative_with_cache(n2, &wrt, &input_map, &mut cached_activation, &mut cached_derivative);
 
 					// Multiply n1 * n2 and dn1*n2 + n1*dn2 at the same time.
 					for i in 0..a_height { // Column [Iterating over row]
@@ -198,7 +210,7 @@ impl Graph {
 				let mut result = vec![0.0; self.nodes[node_id].shape.0*self.nodes[node_id].shape.1];
 				let mut residual = vec![0.0; result.len()];
 				{	
-					let (a_real, a_res) = self.get_derivative(a_id, &wrt, &input_map);
+					let (a_real, a_res) = self.get_derivative_with_cache(a_id, &wrt, &input_map, &mut cached_activation, &mut cached_derivative);
 					for i in 0..a_real.len() {
 						result[i] = f(a_real[i]);
 						residual[i] = dfdx(a_real[i])*a_res[i];
@@ -216,8 +228,8 @@ impl Graph {
 				let mut result_real = vec![0.0; self.nodes[node_id].shape.0*self.nodes[node_id].shape.1];
 				let mut result_residual = vec![0.0; result_real.len()];
 				{
-					let (a_real, a_res) = self.get_derivative(node_a_id, &wrt, &input_map);
-					let (b_real, b_res) = self.get_derivative(node_b_id, &wrt, &input_map);
+					let (a_real, a_res) = self.get_derivative_with_cache(node_a_id, &wrt, &input_map, &mut cached_activation, &mut cached_derivative);
+					let (b_real, b_res) = self.get_derivative_with_cache(node_b_id, &wrt, &input_map, &mut cached_activation, &mut cached_derivative);
 					assert_eq!(a_real.len(), b_real.len());
 					assert_eq!(a_res.len(), b_res.len());
 					for i in 0..a_real.len() {
@@ -232,7 +244,12 @@ impl Graph {
 					(result_real, result_residual)
 				}
 			},
-		}
+		};
+
+		cached_activation.insert(node_id, act.clone());
+		cached_derivative.insert(node_id, eps.clone());
+
+		(act, eps)
 	}
 
 	// Node creation
