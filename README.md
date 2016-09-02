@@ -1,2 +1,2 @@
-# RustML
-An experimental Rust+OpenCL graph library for machine learning.
+# Rust Autodiff
+An forward-mode automatic differentiation library using dual numbers.  

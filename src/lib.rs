@@ -16,12 +16,19 @@ extern crate rand;
 
 static KERNEL_SOURCE: &'static str = include_str!("kernel_source.cl");
 
+#[no_mangle]
+pub extern "C" fn sanity_check() -> () {
+	println!("Yes, Rust Call works.");
+}
+
 type Dimension = (usize, usize); // Row/Col.  Height/Width.
 type NodeId = usize;
 
 enum Operation {
 	Input,
 	MatrixMultiply(NodeId, NodeId),
+	//MatrixMultiplyTranspose(NodeId, NodeId), // Second item is the transpose.  More efficient than matmul(a, transpose(b))
+	Transpose(NodeId),
 	Unary(NodeId, Box<Fn(f32)->f32>, Box<Fn(f32)->f32>), // x, f, df/dx
 	Binary(NodeId, NodeId, Box<Fn(f32,f32)->f32>, Box<Fn(f32,f32)->f32>, Box<Fn(f32,f32)->f32>), // LHS, RHS, F, dF/dLHS, dF/dRHS
 }
@@ -30,24 +37,6 @@ struct Node {
 	id : NodeId,
 	shape : Dimension,
 	operation : Operation,
-}
-
-fn apply_gradient(weight_matrix : &mut Vec<f32>, activation : &Vec<f32>, gradient : &Vec<f32>, error : &Vec<f32>, learning_rate : f32) {
-	// Activation of the input layer
-	let width = error.len(); // Num columns.
-	let height = gradient.len()/width;
-	// Delta E / delta w_ji = learning rate * (true_j - output_j) * g'(h_j) * x_i
-	for y in 0..height {
-		for x in 0..width {
-			println!("DEBUG: wm[{}] += {} * {} * {} * {}", x+y*width, learning_rate, gradient[x+y*width] , error[x] , activation[y]);
-			weight_matrix[x + y*width] += learning_rate * gradient[x + y*width] * error[x] * activation[y]; // TODO: Multiply by activation at the layer below.;
-			println!("DEBUG: wm[{}] = {}", x+y*width, weight_matrix[x+y*width]);
-		}
-	}
-}
-
-fn get_element_from_tensor(matrix : Vec<f32>, shape : Dimension, x : usize, y : usize) -> f32 { // x = column = j.  y = row = i
-	matrix[x + y*shape.1]
 }
 
 struct Graph {
@@ -69,7 +58,16 @@ impl Graph {
 	}
 
 	fn get_output(&self, node_id : NodeId, input_map : &HashMap<NodeId, Vec<f32>>) -> Vec<f32> {
-		match self.nodes[node_id].operation {
+		let mut cache = HashMap::new();
+		self.get_output_with_cache(node_id, &input_map, &mut cache)
+	}
+
+	fn get_output_with_cache(&self, node_id : NodeId, input_map : &HashMap<NodeId, Vec<f32>>, mut cached_activation : &mut HashMap<NodeId, Vec<f32>>) -> Vec<f32> {
+		if cached_activation.contains_key(&node_id) {
+			return cached_activation.get(&node_id).unwrap().clone();
+		}
+
+		let new_cached_activation = match self.nodes[node_id].operation {
 			Operation::Input => { input_map.get(&node_id).unwrap().clone() },
 			Operation::MatrixMultiply(n1, n2) => {
 				// Verify shapes
@@ -85,8 +83,8 @@ impl Graph {
 				let mut result = vec![0.0; self.nodes[node_id].shape.0*self.nodes[node_id].shape.1];
 
 				// Set up the buffer for this node.
-				let a : Vec<f32> = self.get_output(n1, &input_map);
-				let b : Vec<f32> = self.get_output(n2, &input_map);
+				let a : Vec<f32> = self.get_output_with_cache(n1, &input_map, &mut cached_activation);
+				let b : Vec<f32> = self.get_output_with_cache(n2, &input_map, &mut cached_activation);
 
 				// Multiply
 				for i in 0..a_height { // Column [Iterating over row]
@@ -101,8 +99,27 @@ impl Graph {
 
 				result
 			},
+			Operation::Transpose(n) => {
+				// Verify shapes
+				let a_width = self.nodes[n].shape.1; // Columns (j)
+				let a_height = self.nodes[n].shape.0; // Rows (i)
+
+				let mut result = vec![0.0; self.nodes[node_id].shape.0*self.nodes[node_id].shape.1];
+
+				// Set up the buffer for this node.
+				let a : Vec<f32> = self.get_output_with_cache(n, &input_map, &mut cached_activation);
+
+				// Multiply
+				for i in 0..a_height { // Column [Iterating over row]
+					for j in 0..a_width { // Row/Width [Iterating over column]
+						result[i + j*a_width] = a[j + i*a_width];
+					}
+				}
+
+				result
+			},
 			Operation::Unary(node_id, ref f, _) => {
-				let a : Vec<f32> = self.get_output(node_id, &input_map);
+				let a : Vec<f32> = self.get_output_with_cache(node_id, &input_map, &mut cached_activation);
 				let mut result = vec![0.0; a.len()];
 				for i in 0..a.len() {
 					result[i] = f(a[i]);
@@ -110,8 +127,8 @@ impl Graph {
 				result
 			},
 			Operation::Binary(node_a_id, node_b_id, ref f, _, _) => { // LHS, RHS, F, dF/dLHS, dF/dRHS
-				let a : Vec<f32> = self.get_output(node_a_id, &input_map);
-				let b : Vec<f32> = self.get_output(node_b_id, &input_map);
+				let a : Vec<f32> = self.get_output_with_cache(node_a_id, &input_map, &mut cached_activation);
+				let b : Vec<f32> = self.get_output_with_cache(node_b_id, &input_map, &mut cached_activation);
 				assert_eq!(a.len(), b.len());
 				let mut result = vec![0.0; a.len()];
 				for i in 0..a.len() {
@@ -119,10 +136,11 @@ impl Graph {
 				}
 				result
 			},
-		}
-	}
+		};
 
-	fn backprop(&self, output_node : NodeId, input_map : &HashMap<NodeId, Vec<f32>>, error : Vec<f32>) {
+		cached_activation.insert(node_id, new_cached_activation.clone());
+
+		new_cached_activation
 	}
 
 	fn get_derivative(&self, node_id : NodeId, wrt : &[NodeId], input_map : &HashMap<NodeId, Vec<f32>>) -> (Vec<f32>, Vec<f32>) {
@@ -205,6 +223,26 @@ impl Graph {
 				} else {
 					(result, residual)
 				}
+			},
+			Operation::Transpose(n) => {
+				// Verify shapes
+				let a_width = self.nodes[n].shape.1; // Columns (j)
+				let a_height = self.nodes[n].shape.0; // Rows (i)
+
+				let (a_result, a_residual) = self.get_derivative_with_cache(n, &wrt, &input_map, &mut cached_activation, &mut cached_derivative);
+				assert_eq!(a_width*a_height, a_result.len());
+				let mut result = vec![0.0; a_result.len()]; 
+				let mut residual = vec![0.0; a_result.len()];
+
+				// Multiply
+				for i in 0..a_height { // Column [Iterating over row]
+					for j in 0..a_width { // Row/Width [Iterating over column]
+						result[i + j*a_width] = a_result[j + i*a_width];
+						residual[i + j*a_width] = a_residual[j + i*a_width];
+					}
+				}
+
+				(result, residual)
 			},
 			Operation::Unary(a_id, ref f, ref dfdx) => {
 				let mut result = vec![0.0; self.nodes[node_id].shape.0*self.nodes[node_id].shape.1];
@@ -348,10 +386,63 @@ impl Graph {
 	}
 }
 
+struct Optimizer<'a> {
+	graph : Graph,
+	params : &'a [NodeId],
+	values : HashMap<NodeId,Vec<f32>>,
+	cost : NodeId,
+	learning_rate : f32,
+	learning_rate_decay : f32,
+}
+
+impl<'a> Optimizer<'a> {
+	fn new(g : Graph, p : &'a [NodeId], initial_values : HashMap<NodeId, Vec<f32>>, c : NodeId, lr : f32, lrd : f32) -> Optimizer {
+		Optimizer {
+			graph : g,
+			params : p,
+			values : initial_values,
+			cost : c,
+			learning_rate : lr,
+			learning_rate_decay : lrd
+		}
+	}
+
+	fn minimize(&mut self, iterations : u64, examples : Vec<HashMap<NodeId, Vec<f32>>>) {
+		for i in 0..iterations {
+			for ex in &examples {
+				self.minimize_step(ex);
+			}
+			self.learning_rate *= self.learning_rate_decay;
+			println!("Finished iteration {}", i);
+		}
+	}
+
+	fn minimize_step(&mut self, example : &HashMap<NodeId, Vec<f32>>) {
+		let mut input : HashMap<NodeId,Vec<f32>> = HashMap::new();
+		for (k, v) in example {
+			input.insert(*k, v.clone());
+		}
+		for k in self.params {
+			input.insert(*k, self.values.get(&k).unwrap().clone());
+		}
+
+		let mut cached_activation : HashMap<NodeId, Vec<f32>> = HashMap::new();
+		let mut cached_derivative : HashMap<NodeId, Vec<f32>> = HashMap::new();
+
+		// Forward prop and get derivative at output.
+		let (out, dout) = self.graph.get_derivative_with_cache(self.cost, self.params, &input, &mut cached_activation, &mut cached_derivative);
+		println!("Cost: {:?}", out);
+
+		// Backprop error gradient.
+		// delta_w_ij = alpha * (tj - yj) * g'(h_j) * x_i
+		// dw = learning_rate * (truth - out) * derivative_of_activation(input_activation) * input_activation
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	extern crate rand;
-	use super::{Graph, Dimension, Node, NodeId, apply_gradient};
+	use super::{Optimizer, Graph, Dimension, Node, NodeId};
 	use std::collections::HashMap;
 	use rand::Rng;
 

@@ -1,8 +1,11 @@
 [package]
-name = "ml"
+name = "rustml"
 version = "0.1.0"
 authors = ["Joseph Catrambone <jo.jcat@gmail.com>"]
 
+[lib]
+name = "mllib"
+crate-type = ["dylib"]
+
 [dependencies]
-ocl = "0.10"
 rand = "0.3"
